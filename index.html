@@ -1,0 +1,1385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>宝宝成长记录</title>
+
+    <!-- 本地依赖 -->
+    <script src="public/libs/tailwind.min.js"></script>
+    <script src="public/libs/react.production.min.js"></script>
+    <script src="public/libs/react-dom.production.min.js"></script>
+    <script src="public/libs/babel.min.js"></script>
+    <script src="public/libs/prop-types.min.js"></script>
+    <script src="public/libs/Recharts.min.js"></script>
+
+    <style>
+        body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .card { background: rgba(255,255,255,0.95); backdrop-filter: blur(10px); }
+        .stat-card { transition: transform 0.2s; }
+        .stat-card:hover { transform: translateY(-2px); }
+        /* 移动端底部导航 */
+        .mobile-nav {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 40;
+            padding-bottom: env(safe-area-inset-bottom);
+        }
+        /* 移动端内容区域留出底部空间 */
+        @media (max-width: 768px) {
+            .main-content { padding-bottom: 100px; }
+        }
+        /* 图片懒加载占位 */
+        .img-placeholder {
+            background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+        }
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef, useCallback } = React;
+        const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } = Recharts;
+
+        // 主应用
+        const App = () => {
+            const [view, setView] = useState('dashboard');
+            const [baby, setBaby] = useState({ name: "宝宝", birthDate: "2023-06-15", gender: "male", bloodType: "A" });
+            const [records, setRecords] = useState([]);
+            const [media, setMedia] = useState([]);
+            const [showModal, setShowModal] = useState(false);
+            const [editingRecord, setEditingRecord] = useState(null);
+            const [selectedMediaIds, setSelectedMediaIds] = useState([]);
+            const [viewingRecord, setViewingRecord] = useState(null);
+            const [lightboxImage, setLightboxImage] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [isDemo, setIsDemo] = useState(false);
+            const [authEnabled, setAuthEnabled] = useState(false);
+            const [backupSettings, setBackupSettings] = useState({
+                enabled: false,
+                mode: 'interval', // 'interval' 或 'schedule'
+                interval: 24,
+                scheduleTime: '00:00',
+                scheduleDay: 'daily', // 'daily' 或 0-6
+                path: './backups',
+                maxCount: 10
+            });
+            const [backupFiles, setBackupFiles] = useState([]);
+            const [backupLogs, setBackupLogs] = useState([]);
+            const [backupLoading, setBackupLoading] = useState(false);
+
+            // 图片分页状态
+            const [galleryPage, setGalleryPage] = useState(1);
+            const ITEMS_PER_PAGE = 50; // 每页显示数量
+
+            // 演示数据
+            const DEMO_RECORDS = [
+                { id: 1, date: "2023-06-15", height: 50.0, weight: 3.5, head: 34.0, note: "出生啦 🎉" },
+                { id: 2, date: "2023-07-15", height: 54.5, weight: 4.2, head: 36.0, note: "满月了" },
+                { id: 3, date: "2023-09-15", height: 61.0, weight: 6.0, head: 39.5, note: "百天纪念" },
+                { id: 4, date: "2023-12-15", height: 70.0, weight: 8.5, head: 43.0, note: "半岁啦" },
+                { id: 5, date: "2024-06-15", height: 76.0, weight: 10.0, head: 46.0, note: "一岁生日 🎂" },
+                { id: 6, date: "2024-12-15", height: 85.0, weight: 12.0, head: 48.0, note: "一岁半" },
+                { id: 7, date: "2025-06-15", height: 90.0, weight: 13.5, head: 49.0, note: "两岁啦" },
+            ];
+
+            useEffect(() => {
+                initData();
+            }, []);
+
+            const initData = async () => {
+                try {
+                    // 检查认证状态
+                    const authRes = await fetch('/api/auth/status');
+                    if (authRes.ok) {
+                        const authData = await authRes.json();
+                        setAuthEnabled(authData.enabled);
+                    }
+
+                    const res = await fetch('/api/status');
+                    if (res.ok) {
+                        const [babyRes, recordsRes, mediaRes] = await Promise.all([
+                            fetch('/api/baby').then(r => r.json()),
+                            fetch('/api/records').then(r => r.json()),
+                            fetch('/api/media').then(r => r.json())
+                        ]);
+                        setBaby(babyRes);
+                        setRecords(recordsRes); // 直接使用服务器数据，不再填充演示数据
+                        setMedia(mediaRes);
+                        setIsDemo(false); // 成功连接服务器，不是演示模式
+                    } else {
+                        throw new Error('API不可用');
+                    }
+                } catch (e) {
+                    console.log("使用演示数据");
+                    setRecords(DEMO_RECORDS);
+                    setIsDemo(true);
+                }
+                setLoading(false);
+            };
+
+            // 退出登录
+            const handleLogout = async () => {
+                if (!confirm('确定要退出登录吗？')) return;
+                await fetch('/api/auth/logout', { method: 'POST' });
+                window.location.reload();
+            };
+
+            // 计算宝宝年龄
+            const ageStr = useMemo(() => {
+                const birth = new Date(baby.birthDate);
+                const now = new Date();
+                const months = (now.getFullYear() - birth.getFullYear()) * 12 + (now.getMonth() - birth.getMonth());
+                const years = Math.floor(months / 12);
+                const remainMonths = months % 12;
+                if (years > 0) return `${years}岁${remainMonths}个月`;
+                return `${months}个月`;
+            }, [baby.birthDate]);
+
+            // 最新数据统计
+            const stats = useMemo(() => {
+                if (records.length === 0) return { height: '-', weight: '-', head: '-', count: 0 };
+                const sorted = [...records].sort((a, b) => new Date(b.date) - new Date(a.date));
+                const latest = sorted[0];
+                return {
+                    height: latest.height,
+                    weight: latest.weight,
+                    head: latest.head,
+                    count: records.length
+                };
+            }, [records]);
+
+            // 保存记录
+            const handleSave = async (formData) => {
+                const newRecord = {
+                    date: formData.get('date'),
+                    height: parseFloat(formData.get('height')) || 0,
+                    weight: parseFloat(formData.get('weight')) || 0,
+                    head: parseFloat(formData.get('head')) || 0,
+                    note: formData.get('note') || '',
+                    mediaIds: selectedMediaIds.join(',')
+                };
+
+                if (isDemo) {
+                    if (editingRecord) {
+                        setRecords(prev => prev.map(r => r.id === editingRecord.id ? {...newRecord, id: editingRecord.id} : r));
+                    } else {
+                        setRecords(prev => [...prev, {...newRecord, id: Date.now()}]);
+                    }
+                } else {
+                    const url = editingRecord ? `/api/records/${editingRecord.id}` : '/api/records';
+                    const method = editingRecord ? 'PUT' : 'POST';
+                    await fetch(url, {
+                        method,
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(newRecord)
+                    });
+                    initData();
+                }
+                setShowModal(false);
+                setEditingRecord(null);
+                setSelectedMediaIds([]);
+            };
+
+            // 打开编辑/新增模态框
+            const openRecordModal = (record = null) => {
+                setEditingRecord(record);
+                setSelectedMediaIds(record?.mediaIds ? record.mediaIds.split(',').filter(Boolean) : []);
+                setShowModal(true);
+            };
+
+            // 切换媒体选择
+            const toggleMediaSelection = (mediaUrl) => {
+                setSelectedMediaIds(prev =>
+                    prev.includes(mediaUrl)
+                        ? prev.filter(id => id !== mediaUrl)
+                        : [...prev, mediaUrl]
+                );
+            };
+
+            // 获取记录关联的媒体
+            const getRecordMedia = (record) => {
+                if (!record?.mediaIds) return [];
+                const ids = record.mediaIds.split(',').filter(Boolean);
+                return media.filter(m => ids.includes(m.url));
+            };
+
+            // 按日期分组媒体
+            const mediaGroupedByDate = useMemo(() => {
+                return [...media]
+                    .sort((a, b) => new Date(b.date) - new Date(a.date))
+                    .reduce((groups, item) => {
+                        const date = item.date || '未知日期';
+                        if (!groups[date]) groups[date] = [];
+                        groups[date].push(item);
+                        return groups;
+                    }, {});
+            }, [media]);
+
+            // 分页后的媒体数据
+            const paginatedMedia = useMemo(() => {
+                const allItems = [...media].sort((a, b) => new Date(b.date) - new Date(a.date));
+                return allItems.slice(0, galleryPage * ITEMS_PER_PAGE);
+            }, [media, galleryPage]);
+
+            // 分页后按日期分组
+            const paginatedMediaGrouped = useMemo(() => {
+                return paginatedMedia.reduce((groups, item) => {
+                    const date = item.date || '未知日期';
+                    if (!groups[date]) groups[date] = [];
+                    groups[date].push(item);
+                    return groups;
+                }, {});
+            }, [paginatedMedia]);
+
+            // 是否还有更多
+            const hasMoreMedia = media.length > galleryPage * ITEMS_PER_PAGE;
+
+            // ESC 键关闭灯箱
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    if (e.key === 'Escape' && lightboxImage) {
+                        setLightboxImage(null);
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [lightboxImage]);
+
+            // 删除记录
+            const handleDelete = async (id) => {
+                if (!confirm('确定删除这条记录吗？')) return;
+                if (isDemo) {
+                    setRecords(prev => prev.filter(r => r.id !== id));
+                } else {
+                    await fetch(`/api/records/${id}`, { method: 'DELETE' });
+                    initData();
+                }
+            };
+
+            // 更新宝宝信息
+            const handleUpdateBaby = async (formData) => {
+                const data = {
+                    name: formData.get('name'),
+                    birthDate: formData.get('birthDate'),
+                    gender: formData.get('gender'),
+                    bloodType: formData.get('bloodType')
+                };
+                if (isDemo) {
+                    setBaby(prev => ({...prev, ...data}));
+                } else {
+                    await fetch('/api/baby', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(data)
+                    });
+                    initData();
+                }
+                alert('保存成功！');
+            };
+
+            // 加载备份设置
+            const loadBackupSettings = async () => {
+                try {
+                    const [settingsRes, filesRes, logsRes] = await Promise.all([
+                        fetch('/api/backup/settings').then(r => r.json()),
+                        fetch('/api/backup/files').then(r => r.json()),
+                        fetch('/api/backup/logs').then(r => r.json())
+                    ]);
+                    setBackupSettings(settingsRes);
+                    setBackupFiles(filesRes);
+                    setBackupLogs(logsRes);
+                } catch (e) {
+                    console.error('加载备份设置失败:', e);
+                }
+            };
+
+            // 更新备份设置
+            const handleUpdateBackupSettings = async (newSettings) => {
+                try {
+                    const res = await fetch('/api/backup/settings', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(newSettings)
+                    });
+                    const result = await res.json();
+
+                    if (!res.ok) {
+                        alert('❌ ' + (result.error || '保存失败'));
+                        return;
+                    }
+
+                    setBackupSettings(newSettings);
+                    alert('✅ 备份设置已保存！');
+                } catch (e) {
+                    alert('❌ 保存失败: ' + e.message);
+                }
+            };
+
+            // 手动触发备份
+            const handleManualBackup = async () => {
+                setBackupLoading(true);
+                try {
+                    const res = await fetch('/api/backup/now', { method: 'POST' });
+                    const result = await res.json();
+                    if (result.success) {
+                        alert(`✅ 备份成功！文件: ${result.filename}`);
+                        loadBackupSettings(); // 刷新文件列表
+                    } else {
+                        alert(`❌ 备份失败: ${result.error}`);
+                    }
+                } catch (e) {
+                    alert('❌ 备份失败: ' + e.message);
+                }
+                setBackupLoading(false);
+            };
+
+            // 删除备份文件
+            const handleDeleteBackup = async (filename) => {
+                if (!confirm(`确定删除备份文件 ${filename} 吗？`)) return;
+                try {
+                    await fetch(`/api/backup/files/${filename}`, { method: 'DELETE' });
+                    loadBackupSettings(); // 刷新文件列表
+                } catch (e) {
+                    alert('删除失败: ' + e.message);
+                }
+            };
+
+            // 当切换到设置页时加载备份设置
+            useEffect(() => {
+                if (view === 'settings' && !isDemo) {
+                    loadBackupSettings();
+                }
+            }, [view, isDemo]);
+
+            if (loading) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center">
+                        <div className="text-white text-xl">加载中...</div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 main-content">
+                    {/* 顶部导航 - 桌面端显示完整，移动端只显示标题 */}
+                    <div className="max-w-6xl mx-auto mb-6">
+                        <div className="card rounded-2xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 md:w-12 md:h-12 bg-gradient-to-br from-pink-400 to-purple-500 rounded-full flex items-center justify-center text-white text-xl md:text-2xl">
+                                    👶
+                                </div>
+                                <div>
+                                    <h1 className="text-lg md:text-xl font-bold text-gray-800">{baby.name}的成长记录</h1>
+                                    <p className="text-xs md:text-sm text-gray-500">年龄: {ageStr} | {baby.gender === 'male' ? '👦 男宝' : '👧 女宝'}</p>
+                                </div>
+                            </div>
+                            {/* 桌面端导航按钮 */}
+                            <div className="hidden md:flex gap-2">
+                                {['dashboard', 'records', 'gallery', 'settings'].map(v => (
+                                    <button
+                                        key={v}
+                                        onClick={() => setView(v)}
+                                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                            view === v
+                                            ? 'bg-purple-600 text-white shadow-lg'
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                        }`}
+                                    >
+                                        {v === 'dashboard' ? '📊 看板' : v === 'records' ? '📋 记录' : v === 'gallery' ? '🖼️ 相册' : '⚙️ 设置'}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        {isDemo && (
+                            <div className="mt-3 bg-yellow-100 border border-yellow-300 text-yellow-800 px-4 py-2 rounded-lg text-sm">
+                                📌 当前显示演示数据，添加真实记录后将自动切换
+                            </div>
+                        )}
+                    </div>
+
+                    {/* 移动端底部导航栏 */}
+                    <div className="md:hidden mobile-nav">
+                        <div className="bg-white border-t border-gray-200 shadow-lg">
+                            <div className="flex justify-around py-2">
+                                {[
+                                    { id: 'dashboard', icon: '📊', label: '看板' },
+                                    { id: 'records', icon: '📋', label: '记录' },
+                                    { id: 'gallery', icon: '🖼️', label: '相册' },
+                                    { id: 'settings', icon: '⚙️', label: '设置' }
+                                ].map(item => (
+                                    <button
+                                        key={item.id}
+                                        onClick={() => { setView(item.id); setGalleryPage(1); }}
+                                        className={`flex flex-col items-center px-4 py-2 rounded-lg transition-all ${
+                                            view === item.id
+                                            ? 'text-purple-600'
+                                            : 'text-gray-500'
+                                        }`}
+                                    >
+                                        <span className="text-xl mb-1">{item.icon}</span>
+                                        <span className="text-xs font-medium">{item.label}</span>
+                                        {view === item.id && (
+                                            <div className="w-1 h-1 bg-purple-600 rounded-full mt-1"></div>
+                                        )}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 主内容区 */}
+                    <div className="max-w-6xl mx-auto">
+                        {/* 看板视图 */}
+                        {view === 'dashboard' && (
+                            <div className="space-y-4 md:space-y-6">
+                                {/* 统计卡片 - 移动端2x2网格，更紧凑 */}
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
+                                    <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
+                                        <div className="text-2xl md:text-3xl mb-1 md:mb-2">📏</div>
+                                        <div className="text-xs md:text-sm text-gray-500">最新身高</div>
+                                        <div className="text-xl md:text-2xl font-bold text-purple-600">{stats.height} <span className="text-xs md:text-sm font-normal">cm</span></div>
+                                    </div>
+                                    <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
+                                        <div className="text-2xl md:text-3xl mb-1 md:mb-2">⚖️</div>
+                                        <div className="text-xs md:text-sm text-gray-500">最新体重</div>
+                                        <div className="text-xl md:text-2xl font-bold text-green-600">{stats.weight} <span className="text-xs md:text-sm font-normal">kg</span></div>
+                                    </div>
+                                    <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
+                                        <div className="text-2xl md:text-3xl mb-1 md:mb-2">🧒</div>
+                                        <div className="text-xs md:text-sm text-gray-500">最新头围</div>
+                                        <div className="text-xl md:text-2xl font-bold text-blue-600">{stats.head} <span className="text-xs md:text-sm font-normal">cm</span></div>
+                                    </div>
+                                    <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
+                                        <div className="text-2xl md:text-3xl mb-1 md:mb-2">📝</div>
+                                        <div className="text-xs md:text-sm text-gray-500">记录次数</div>
+                                        <div className="text-xl md:text-2xl font-bold text-orange-600">{stats.count} <span className="text-xs md:text-sm font-normal">次</span></div>
+                                    </div>
+                                </div>
+
+                                {/* 成长曲线图 - 移动端高度调整 */}
+                                <div className="card rounded-xl md:rounded-2xl p-4 md:p-6">
+                                    <h3 className="text-base md:text-lg font-bold text-gray-800 mb-3 md:mb-4">📈 成长曲线</h3>
+                                    <div className="h-56 md:h-80">
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <LineChart data={[...records].sort((a,b) => new Date(a.date) - new Date(b.date))}>
+                                                <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                                                <XAxis dataKey="date" tick={{fontSize: 10}} interval="preserveStartEnd" />
+                                                <YAxis yAxisId="left" orientation="left" tick={{fontSize: 10}} width={35} />
+                                                <YAxis yAxisId="right" orientation="right" tick={{fontSize: 10}} width={35} />
+                                                <Tooltip />
+                                                <Line yAxisId="left" type="monotone" dataKey="height" stroke="#8b5cf6" strokeWidth={2} dot={{fill: '#8b5cf6', r: 3}} name="身高(cm)" />
+                                                <Line yAxisId="right" type="monotone" dataKey="weight" stroke="#10b981" strokeWidth={2} dot={{fill: '#10b981', r: 3}} name="体重(kg)" />
+                                            </LineChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                </div>
+
+                                {/* 最近记录 - 移动端优化 */}
+                                <div className="card rounded-xl md:rounded-2xl p-4 md:p-6">
+                                    <h3 className="text-base md:text-lg font-bold text-gray-800 mb-3 md:mb-4">🕐 最近记录</h3>
+                                    <div className="space-y-2 md:space-y-3">
+                                        {[...records].sort((a,b) => new Date(b.date) - new Date(a.date)).slice(0, 5).map(r => (
+                                            <div key={r.id} className="flex items-center justify-between p-2 md:p-3 bg-gray-50 rounded-lg md:rounded-xl">
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="font-medium text-gray-800 text-sm md:text-base">{r.date}</div>
+                                                    <div className="text-xs md:text-sm text-gray-500 truncate">{r.note || '无备注'}</div>
+                                                </div>
+                                                <div className="text-right text-xs md:text-sm ml-2 flex-shrink-0">
+                                                    <div className="text-purple-600">{r.height}cm</div>
+                                                    <div className="text-green-600">{r.weight}kg</div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 记录视图 - 时间轴样式 */}
+                        {view === 'records' && (
+                            <div className="card rounded-xl md:rounded-2xl p-4 md:p-6">
+                                <div className="flex justify-between items-center mb-4 md:mb-6">
+                                    <h3 className="text-base md:text-lg font-bold text-gray-800">📋 成长记录</h3>
+                                    <button
+                                        onClick={() => openRecordModal(null)}
+                                        className="bg-purple-600 text-white px-3 md:px-4 py-2 rounded-lg text-sm font-medium hover:bg-purple-700 active:bg-purple-800"
+                                    >
+                                        ➕ 新增
+                                    </button>
+                                </div>
+
+                                {records.length > 0 ? (
+                                    <div className="relative">
+                                        {/* 时间轴竖线 */}
+                                        <div className="absolute left-3 md:left-6 top-0 bottom-0 w-0.5 bg-gradient-to-b from-purple-400 via-purple-300 to-purple-200"></div>
+
+                                        {/* 记录列表 */}
+                                        <div className="space-y-4 md:space-y-6">
+                                            {[...records].sort((a,b) => new Date(b.date) - new Date(a.date)).map((r, index) => {
+                                                const recordMedia = getRecordMedia(r);
+                                                const dateObj = new Date(r.date);
+                                                const month = dateObj.getMonth() + 1;
+                                                const day = dateObj.getDate();
+                                                const year = dateObj.getFullYear();
+
+                                                return (
+                                                    <div key={r.id} className="relative pl-8 md:pl-14">
+                                                        {/* 时间点圆圈 */}
+                                                        <div className={`absolute left-1 md:left-4 w-5 h-5 md:w-5 md:h-5 rounded-full border-2 border-white shadow-md flex items-center justify-center ${
+                                                            index === 0 ? 'bg-purple-500' : 'bg-purple-300'
+                                                        }`}>
+                                                            {index === 0 && <div className="w-2 h-2 bg-white rounded-full"></div>}
+                                                        </div>
+
+                                                        {/* 记录卡片 */}
+                                                        <div
+                                                            className="bg-gray-50 hover:bg-gray-100 rounded-xl p-3 md:p-4 cursor-pointer transition-all border border-gray-100 hover:border-purple-200 hover:shadow-sm"
+                                                            onClick={() => setViewingRecord(r)}
+                                                        >
+                                                            {/* 日期头部 */}
+                                                            <div className="flex items-center justify-between mb-3">
+                                                                <div className="flex items-center gap-2">
+                                                                    <div className="bg-purple-100 text-purple-700 px-2 py-1 rounded-lg text-xs md:text-sm font-medium">
+                                                                        {month}月{day}日
+                                                                    </div>
+                                                                    <span className="text-gray-400 text-xs">{year}年</span>
+                                                                    {index === 0 && (
+                                                                        <span className="bg-green-100 text-green-600 px-2 py-0.5 rounded text-xs">最新</span>
+                                                                    )}
+                                                                </div>
+                                                                {recordMedia.length > 0 && (
+                                                                    <span className="text-purple-600 text-sm flex items-center gap-1">
+                                                                        🖼️ {recordMedia.length}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+
+                                                            {/* 数据展示 */}
+                                                            <div className="flex flex-wrap gap-3 md:gap-4 mb-2">
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <span className="text-lg">📏</span>
+                                                                    <span className="text-purple-600 font-bold">{r.height}</span>
+                                                                    <span className="text-gray-400 text-sm">cm</span>
+                                                                </div>
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <span className="text-lg">⚖️</span>
+                                                                    <span className="text-green-600 font-bold">{r.weight}</span>
+                                                                    <span className="text-gray-400 text-sm">kg</span>
+                                                                </div>
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <span className="text-lg">🧒</span>
+                                                                    <span className="text-blue-600 font-bold">{r.head}</span>
+                                                                    <span className="text-gray-400 text-sm">cm</span>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* 备注 */}
+                                                            {r.note && (
+                                                                <div className="text-gray-600 text-sm bg-white rounded-lg px-3 py-2 mt-2">
+                                                                    💬 {r.note}
+                                                                </div>
+                                                            )}
+
+                                                            {/* 关联图片预览 */}
+                                                            {recordMedia.length > 0 && (
+                                                                <div className="flex gap-2 mt-3 overflow-x-auto pb-1">
+                                                                    {recordMedia.slice(0, 4).map(m => (
+                                                                        <div
+                                                                            key={m.id}
+                                                                            className="flex-shrink-0 w-12 h-12 md:w-14 md:h-14 rounded-lg overflow-hidden bg-gray-200"
+                                                                            onClick={(e) => { e.stopPropagation(); setLightboxImage(m); }}
+                                                                        >
+                                                                            <img src={m.thumb || m.url} alt="" className="w-full h-full object-cover" />
+                                                                        </div>
+                                                                    ))}
+                                                                    {recordMedia.length > 4 && (
+                                                                        <div className="flex-shrink-0 w-12 h-12 md:w-14 md:h-14 rounded-lg bg-gray-200 flex items-center justify-center text-gray-500 text-sm">
+                                                                            +{recordMedia.length - 4}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+
+                                                            {/* 操作按钮 */}
+                                                            <div className="flex justify-end gap-4 mt-3 pt-2 border-t border-gray-200">
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); openRecordModal(r); }}
+                                                                    className="text-blue-600 text-sm hover:text-blue-800 flex items-center gap-1"
+                                                                >
+                                                                    ✏️ 编辑
+                                                                </button>
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); handleDelete(r.id); }}
+                                                                    className="text-red-500 text-sm hover:text-red-700 flex items-center gap-1"
+                                                                >
+                                                                    🗑️ 删除
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="text-center py-16">
+                                        <div className="text-5xl mb-4">📝</div>
+                                        <h4 className="text-lg font-medium text-gray-700 mb-2">暂无成长记录</h4>
+                                        <p className="text-gray-500 text-sm mb-4">点击上方按钮添加第一条记录</p>
+                                        <button
+                                            onClick={() => openRecordModal(null)}
+                                            className="bg-purple-600 text-white px-6 py-2 rounded-xl font-medium hover:bg-purple-700"
+                                        >
+                                            ➕ 添加记录
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* 相册视图 - 时间线模式（分页加载） */}
+                        {view === 'gallery' && (
+                            <div className="card rounded-2xl p-4 md:p-6">
+                                <div className="flex justify-between items-center mb-4 md:mb-6">
+                                    <h3 className="text-lg font-bold text-gray-800">🖼️ 照片时间线</h3>
+                                    {media.length > 0 && (
+                                        <span className="text-sm text-gray-500">
+                                            已加载 {paginatedMedia.length} / {media.length} 张
+                                        </span>
+                                    )}
+                                </div>
+                                {media.length > 0 ? (
+                                    <div className="relative">
+                                        {/* 时间线竖线 - 移动端隐藏 */}
+                                        <div className="hidden md:block absolute left-6 top-0 bottom-0 w-0.5 bg-purple-200"></div>
+
+                                        {/* 按日期分组（使用分页数据） */}
+                                        {Object.entries(paginatedMediaGrouped).map(([date, items]) => (
+                                            <div key={date} className="relative pl-0 md:pl-16 pb-6 md:pb-8">
+                                                {/* 时间点 - 移动端隐藏 */}
+                                                <div className="hidden md:block absolute left-4 w-5 h-5 bg-purple-500 rounded-full border-4 border-white shadow"></div>
+
+                                                {/* 日期标签 */}
+                                                <div className="mb-3 sticky top-0 bg-white/95 backdrop-blur py-2 -mx-4 px-4 md:mx-0 md:px-0 md:static md:bg-transparent z-10">
+                                                    <span className="bg-purple-100 text-purple-700 text-sm font-medium px-3 py-1 rounded-full">
+                                                        📅 {date}
+                                                    </span>
+                                                    <span className="text-gray-400 text-sm ml-2">{items.length} 张</span>
+                                                </div>
+
+                                                {/* 缩略图网格 - 移动端更大的缩略图 */}
+                                                <div className="grid grid-cols-4 md:flex md:flex-wrap gap-1 md:gap-2">
+                                                    {items.map(m => (
+                                                        <div
+                                                            key={m.id}
+                                                            className="aspect-square md:w-20 md:h-20 bg-gray-100 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-purple-400 transition-all group relative"
+                                                            onClick={() => setLightboxImage(m)}
+                                                            title={m.title || '点击查看大图'}
+                                                        >
+                                                            {m.type === 'video' ? (
+                                                                <div className="w-full h-full flex items-center justify-center bg-gray-200">
+                                                                    <span className="text-2xl">🎬</span>
+                                                                </div>
+                                                            ) : (
+                                                                <img
+                                                                    src={m.thumb || m.url}
+                                                                    alt={m.title}
+                                                                    className="w-full h-full object-cover group-hover:scale-110 transition-transform"
+                                                                    loading="lazy"
+                                                                />
+                                                            )}
+                                                            {/* 悬浮标题 - 仅桌面端显示 */}
+                                                            <div className="hidden md:block absolute inset-x-0 bottom-0 bg-black/60 text-white text-xs p-1 truncate opacity-0 group-hover:opacity-100 transition-opacity">
+                                                                {m.title || '查看'}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ))}
+
+                                        {/* 加载更多按钮 */}
+                                        {hasMoreMedia && (
+                                            <div className="text-center pt-4 pb-2">
+                                                <button
+                                                    onClick={() => setGalleryPage(prev => prev + 1)}
+                                                    className="bg-purple-100 text-purple-700 px-6 py-3 rounded-xl font-medium hover:bg-purple-200 transition-colors"
+                                                >
+                                                    📷 加载更多照片 ({media.length - paginatedMedia.length} 张)
+                                                </button>
+                                            </div>
+                                        )}
+
+                                        {/* 已加载全部提示 */}
+                                        {!hasMoreMedia && media.length > ITEMS_PER_PAGE && (
+                                            <div className="text-center pt-4 pb-2 text-gray-400 text-sm">
+                                                ✅ 已加载全部 {media.length} 张照片
+                                            </div>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div className="text-center py-16">
+                                        <div className="text-6xl mb-4">📷</div>
+                                        <h4 className="text-lg font-medium text-gray-700 mb-2">暂无照片</h4>
+                                        <p className="text-gray-500 text-sm">将照片放入服务器的 media 目录即可显示</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* 设置视图 */}
+                        {view === 'settings' && (
+                            <div className="space-y-6">
+                                {/* 账户安全区域 - 仅在认证启用时显示 */}
+                                {authEnabled && (
+                                    <div className="card rounded-2xl p-4 flex items-center justify-between">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center text-xl">🔐</div>
+                                            <div>
+                                                <div className="font-medium text-gray-800">已登录</div>
+                                                <div className="text-sm text-gray-500">身份验证已启用</div>
+                                            </div>
+                                        </div>
+                                        <button
+                                            onClick={handleLogout}
+                                            className="bg-red-500 text-white px-4 py-2 rounded-xl font-medium hover:bg-red-600 text-sm"
+                                        >
+                                            🚪 退出登录
+                                        </button>
+                                    </div>
+                                )}
+
+                                <div className="grid md:grid-cols-2 gap-6">
+                                {/* 左侧：宝宝档案设置 */}
+                                <div className="card rounded-2xl p-6">
+                                    <h3 className="text-lg font-bold text-gray-800 mb-6">⚙️ 宝宝档案设置</h3>
+                                    <form onSubmit={(e) => { e.preventDefault(); handleUpdateBaby(new FormData(e.target)); }}>
+                                        <div className="space-y-4">
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">宝宝昵称</label>
+                                                <input name="name" defaultValue={baby.name} className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">出生日期</label>
+                                                <input type="date" name="birthDate" defaultValue={baby.birthDate} className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none" />
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">性别</label>
+                                                    <select name="gender" defaultValue={baby.gender} className="w-full p-3 border border-gray-200 rounded-xl outline-none">
+                                                        <option value="male">男宝宝</option>
+                                                        <option value="female">女宝宝</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">血型</label>
+                                                    <input name="bloodType" defaultValue={baby.bloodType} className="w-full p-3 border border-gray-200 rounded-xl outline-none" />
+                                                </div>
+                                            </div>
+                                            <button className="w-full bg-purple-600 text-white py-3 rounded-xl font-medium hover:bg-purple-700 mt-4">
+                                                💾 保存设置
+                                            </button>
+                                        </div>
+                                    </form>
+                                </div>
+
+                                {/* 右侧：自动备份设置 */}
+                                <div className="card rounded-2xl p-6">
+                                    <h3 className="text-lg font-bold text-gray-800 mb-6">🔄 自动备份设置</h3>
+
+                                    {isDemo ? (
+                                        <div className="text-center py-8 text-gray-400">
+                                            <div className="text-4xl mb-2">🔒</div>
+                                            <p>连接到服务器后可配置自动备份</p>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-4">
+                                            {/* 启用开关 */}
+                                            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl">
+                                                <div>
+                                                    <div className="font-medium text-gray-800">启用自动备份</div>
+                                                    <div className="text-xs text-gray-500">按设定周期自动备份数据</div>
+                                                </div>
+                                                <button
+                                                    onClick={() => handleUpdateBackupSettings({...backupSettings, enabled: !backupSettings.enabled})}
+                                                    className={`w-14 h-7 rounded-full transition-colors relative ${backupSettings.enabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                                                >
+                                                    <div className={`w-5 h-5 bg-white rounded-full absolute top-1 transition-transform ${backupSettings.enabled ? 'translate-x-8' : 'translate-x-1'}`}></div>
+                                                </button>
+                                            </div>
+
+                                            {/* 备份模式选择 */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">备份模式</label>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <button
+                                                        onClick={() => setBackupSettings(prev => ({...prev, mode: 'interval'}))}
+                                                        className={`p-2 rounded-lg text-sm font-medium transition-all ${
+                                                            backupSettings.mode === 'interval'
+                                                                ? 'bg-purple-600 text-white'
+                                                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                                        }`}
+                                                    >
+                                                        ⏱️ 间隔模式
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setBackupSettings(prev => ({...prev, mode: 'schedule'}))}
+                                                        className={`p-2 rounded-lg text-sm font-medium transition-all ${
+                                                            backupSettings.mode === 'schedule'
+                                                                ? 'bg-purple-600 text-white'
+                                                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                                        }`}
+                                                    >
+                                                        📅 定时模式
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            {/* 间隔模式设置 */}
+                                            {backupSettings.mode === 'interval' && (
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">备份间隔</label>
+                                                    <select
+                                                        value={backupSettings.interval}
+                                                        onChange={(e) => setBackupSettings(prev => ({...prev, interval: parseInt(e.target.value)}))}
+                                                        className="w-full p-3 border border-gray-200 rounded-xl outline-none"
+                                                    >
+                                                        <option value="1">每 1 小时</option>
+                                                        <option value="6">每 6 小时</option>
+                                                        <option value="12">每 12 小时</option>
+                                                        <option value="24">每 24 小时</option>
+                                                        <option value="48">每 48 小时</option>
+                                                        <option value="168">每 7 天</option>
+                                                    </select>
+                                                </div>
+                                            )}
+
+                                            {/* 定时模式设置 */}
+                                            {backupSettings.mode === 'schedule' && (
+                                                <div className="space-y-3">
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-gray-700 mb-1">执行周期</label>
+                                                        <select
+                                                            value={backupSettings.scheduleDay}
+                                                            onChange={(e) => setBackupSettings(prev => ({...prev, scheduleDay: e.target.value}))}
+                                                            className="w-full p-3 border border-gray-200 rounded-xl outline-none"
+                                                        >
+                                                            <option value="daily">每天</option>
+                                                            <option value="0">每周日</option>
+                                                            <option value="1">每周一</option>
+                                                            <option value="2">每周二</option>
+                                                            <option value="3">每周三</option>
+                                                            <option value="4">每周四</option>
+                                                            <option value="5">每周五</option>
+                                                            <option value="6">每周六</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-gray-700 mb-1">执行时间</label>
+                                                        <input
+                                                            type="time"
+                                                            value={backupSettings.scheduleTime}
+                                                            onChange={(e) => setBackupSettings(prev => ({...prev, scheduleTime: e.target.value}))}
+                                                            className="w-full p-3 border border-gray-200 rounded-xl outline-none"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* 备份路径 */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">备份存储路径</label>
+                                                <input
+                                                    type="text"
+                                                    value={backupSettings.path}
+                                                    onChange={(e) => setBackupSettings(prev => ({...prev, path: e.target.value}))}
+                                                    className="w-full p-3 border border-gray-200 rounded-xl outline-none"
+                                                    placeholder="./backups"
+                                                />
+                                            </div>
+
+                                            {/* 保留数量 */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">最多保留备份数</label>
+                                                <select
+                                                    value={backupSettings.maxCount}
+                                                    onChange={(e) => setBackupSettings(prev => ({...prev, maxCount: parseInt(e.target.value)}))}
+                                                    className="w-full p-3 border border-gray-200 rounded-xl outline-none"
+                                                >
+                                                    <option value="5">保留 5 个</option>
+                                                    <option value="10">保留 10 个</option>
+                                                    <option value="20">保留 20 个</option>
+                                                    <option value="50">保留 50 个</option>
+                                                </select>
+                                            </div>
+
+                                            {/* 保存按钮和立即备份 */}
+                                            <div className="grid grid-cols-2 gap-3 pt-2">
+                                                <button
+                                                    onClick={() => handleUpdateBackupSettings(backupSettings)}
+                                                    className="bg-purple-600 text-white py-2 rounded-xl font-medium hover:bg-purple-700 text-sm"
+                                                >
+                                                    💾 保存设置
+                                                </button>
+                                                <button
+                                                    onClick={handleManualBackup}
+                                                    disabled={backupLoading}
+                                                    className="bg-orange-500 text-white py-2 rounded-xl font-medium hover:bg-orange-600 text-sm disabled:bg-gray-400"
+                                                >
+                                                    {backupLoading ? '⏳ 备份中...' : '🚀 立即备份'}
+                                                </button>
+                                            </div>
+
+                                            {/* 备份状态指示 */}
+                                            <div className={`text-center text-xs py-2 rounded-lg ${backupSettings.enabled ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-400'}`}>
+                                                {backupSettings.enabled
+                                                    ? (backupSettings.mode === 'schedule'
+                                                        ? `✅ 自动备份已启用，${backupSettings.scheduleDay === 'daily' ? '每天' : `每${['周日','周一','周二','周三','周四','周五','周六'][parseInt(backupSettings.scheduleDay)]}`} ${backupSettings.scheduleTime} 执行`
+                                                        : `✅ 自动备份已启用，每 ${backupSettings.interval} 小时执行一次`)
+                                                    : '⏸️ 自动备份已禁用'}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* 备份文件列表（全宽） */}
+                                {!isDemo && (
+                                    <div className="card rounded-2xl p-6 md:col-span-2">
+                                        <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-3 mb-4">
+                                            <h3 className="text-lg font-bold text-gray-800">📁 备份文件管理</h3>
+                                            <div className="flex flex-wrap gap-2">
+                                                <a
+                                                    href="/api/export"
+                                                    className="bg-green-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-green-700 flex items-center gap-1"
+                                                >
+                                                    📤 导出备份
+                                                </a>
+                                                <label className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-blue-700 cursor-pointer flex items-center gap-1">
+                                                    📥 导入备份
+                                                    <input
+                                                        type="file"
+                                                        accept=".tar.gz,.tgz"
+                                                        className="hidden"
+                                                        onChange={async (e) => {
+                                                            const file = e.target.files[0];
+                                                            if (!file) return;
+
+                                                            if (!confirm('导入将覆盖现有数据，确定继续吗？')) {
+                                                                e.target.value = '';
+                                                                return;
+                                                            }
+
+                                                            try {
+                                                                const arrayBuffer = await file.arrayBuffer();
+                                                                const res = await fetch('/api/import', {
+                                                                    method: 'POST',
+                                                                    headers: { 'Content-Type': 'application/gzip' },
+                                                                    body: arrayBuffer
+                                                                });
+                                                                const result = await res.json();
+
+                                                                if (result.success) {
+                                                                    alert(`✅ ${result.message}`);
+                                                                    window.location.reload();
+                                                                } else {
+                                                                    alert(`❌ ${result.error}`);
+                                                                }
+                                                            } catch (err) {
+                                                                alert('❌ 导入失败: ' + err.message);
+                                                            }
+                                                            e.target.value = '';
+                                                        }}
+                                                    />
+                                                </label>
+                                                <button
+                                                    onClick={loadBackupSettings}
+                                                    className="bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-gray-200 flex items-center gap-1"
+                                                >
+                                                    🔄 刷新
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {backupFiles.length > 0 ? (
+                                            <div className="overflow-x-auto">
+                                                <table className="w-full">
+                                                    <thead>
+                                                        <tr className="border-b border-gray-200">
+                                                            <th className="text-left p-2 text-sm font-medium text-gray-500">文件名</th>
+                                                            <th className="text-left p-2 text-sm font-medium text-gray-500">大小</th>
+                                                            <th className="text-left p-2 text-sm font-medium text-gray-500">创建时间</th>
+                                                            <th className="text-right p-2 text-sm font-medium text-gray-500">操作</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {backupFiles.map(f => (
+                                                            <tr key={f.filename} className="border-b border-gray-100 hover:bg-gray-50">
+                                                                <td className="p-2 text-gray-800 text-sm font-mono">{f.filename}</td>
+                                                                <td className="p-2 text-gray-500 text-sm">{(f.size / 1024).toFixed(1)} KB</td>
+                                                                <td className="p-2 text-gray-500 text-sm">{new Date(f.created).toLocaleString()}</td>
+                                                                <td className="p-2 text-right">
+                                                                    <a
+                                                                        href={`/api/backup/download/${f.filename}`}
+                                                                        className="text-blue-600 hover:text-blue-800 mr-3 text-sm"
+                                                                    >
+                                                                        ⬇️ 下载
+                                                                    </a>
+                                                                    <button
+                                                                        onClick={() => handleDeleteBackup(f.filename)}
+                                                                        className="text-red-500 hover:text-red-700 text-sm"
+                                                                    >
+                                                                        🗑️ 删除
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        ) : (
+                                            <div className="text-center py-8 text-gray-400">
+                                                <div className="text-4xl mb-2">📭</div>
+                                                <p>暂无备份文件</p>
+                                                <p className="text-xs mt-1">点击"立即备份"创建第一个备份</p>
+                                            </div>
+                                        )}
+
+                                        {/* 最近备份日志 */}
+                                        {backupLogs.length > 0 && (
+                                            <div className="mt-6 pt-4 border-t border-gray-200">
+                                                <h4 className="text-sm font-medium text-gray-700 mb-3">📜 最近备份记录</h4>
+                                                <div className="space-y-2 max-h-40 overflow-y-auto">
+                                                    {backupLogs.slice(0, 10).map(log => (
+                                                        <div key={log.id} className={`text-xs p-2 rounded-lg flex justify-between ${log.status === 'success' ? 'bg-green-50' : 'bg-red-50'}`}>
+                                                            <span className="text-gray-600">{new Date(log.timestamp).toLocaleString()}</span>
+                                                            <span className={log.status === 'success' ? 'text-green-600' : 'text-red-600'}>
+                                                                {log.status === 'success' ? `✅ ${log.filename}` : `❌ ${log.status}`}
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* 新增/编辑模态框 */}
+                    {showModal && (
+                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 overflow-y-auto">
+                            <div className="card rounded-2xl w-full max-w-lg overflow-hidden my-4">
+                                <div className="bg-purple-600 text-white p-4 flex justify-between items-center">
+                                    <h3 className="font-bold">{editingRecord ? '✏️ 编辑记录' : '➕ 新增记录'}</h3>
+                                    <button onClick={() => { setShowModal(false); setSelectedMediaIds([]); }} className="text-white/80 hover:text-white text-xl">×</button>
+                                </div>
+                                <form onSubmit={(e) => { e.preventDefault(); handleSave(new FormData(e.target)); }} className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">记录日期</label>
+                                        <input type="date" name="date" required defaultValue={editingRecord?.date || new Date().toISOString().split('T')[0]} className="w-full p-3 border border-gray-200 rounded-xl outline-none" />
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">身高(cm)</label>
+                                            <input type="number" step="0.1" name="height" defaultValue={editingRecord?.height} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="70.5" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">体重(kg)</label>
+                                            <input type="number" step="0.01" name="weight" defaultValue={editingRecord?.weight} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="8.5" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">头围(cm)</label>
+                                            <input type="number" step="0.1" name="head" defaultValue={editingRecord?.head} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="43" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">备注/里程碑</label>
+                                        <textarea name="note" rows="2" defaultValue={editingRecord?.note} className="w-full p-3 border border-gray-200 rounded-xl outline-none resize-none" placeholder="例如：第一次翻身"></textarea>
+                                    </div>
+
+                                    {/* 图片/视频选择器 - 时间线模式 */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                            📷 关联照片/视频
+                                            {selectedMediaIds.length > 0 && (
+                                                <span className="ml-2 text-purple-600">已选 {selectedMediaIds.length} 个</span>
+                                            )}
+                                        </label>
+                                        {media.length > 0 ? (
+                                            <div className="border border-gray-200 rounded-xl p-3 max-h-64 overflow-y-auto -webkit-overflow-scrolling-touch">
+                                                {Object.entries(mediaGroupedByDate).slice(0, 20).map(([date, items]) => (
+                                                    <div key={date} className="mb-4 last:mb-0">
+                                                        {/* 日期标签 */}
+                                                        <div className="text-xs text-gray-500 mb-2 flex items-center gap-2">
+                                                            <span className="bg-gray-100 px-2 py-0.5 rounded">📅 {date}</span>
+                                                            <span className="text-gray-300">{items.length} 张</span>
+                                                        </div>
+                                                        {/* 缩略图网格 - 移动端3列，桌面端5列 */}
+                                                        <div className="grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-2">
+                                                            {items.slice(0, 30).map(m => (
+                                                                <button
+                                                                    type="button"
+                                                                    key={m.id}
+                                                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleMediaSelection(m.url); }}
+                                                                    className={`relative w-full aspect-square rounded-lg overflow-hidden transition-all touch-manipulation ${
+                                                                        selectedMediaIds.includes(m.url)
+                                                                            ? 'ring-3 ring-purple-500 ring-offset-2'
+                                                                            : 'ring-1 ring-gray-200'
+                                                                    }`}
+                                                                    style={{ minHeight: '60px', WebkitTapHighlightColor: 'transparent' }}
+                                                                >
+                                                                    {m.type === 'video' ? (
+                                                                        <div className="w-full h-full bg-gray-200 flex items-center justify-center">
+                                                                            <span className="text-xl md:text-lg">🎬</span>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <img src={m.thumb || m.url} alt={m.title} className="w-full h-full object-cover pointer-events-none" loading="lazy" />
+                                                                    )}
+                                                                    {selectedMediaIds.includes(m.url) && (
+                                                                        <div className="absolute top-1 right-1 w-5 h-5 md:w-4 md:h-4 bg-purple-500 rounded-full flex items-center justify-center text-white text-xs md:text-[10px] pointer-events-none">
+                                                                            ✓
+                                                                        </div>
+                                                                    )}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                {Object.keys(mediaGroupedByDate).length > 20 && (
+                                                    <div className="text-center text-xs text-gray-400 mt-2">
+                                                        仅显示最近20天的照片，更多照片请在相册中查看
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <div className="text-center py-4 text-gray-400 text-sm border border-dashed border-gray-200 rounded-xl">
+                                                暂无可选媒体，请先上传照片到 media 目录
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <button type="submit" className="w-full bg-purple-600 text-white py-4 md:py-3 rounded-xl font-medium hover:bg-purple-700 active:bg-purple-800 text-base">
+                                        ✅ 确认保存
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 记录详情查看模态框 */}
+                    {viewingRecord && (
+                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 overflow-y-auto">
+                            <div className="card rounded-2xl w-full max-w-2xl overflow-hidden my-4">
+                                <div className="bg-gradient-to-r from-purple-600 to-pink-500 text-white p-4 flex justify-between items-center">
+                                    <h3 className="font-bold">📋 记录详情 - {viewingRecord.date}</h3>
+                                    <button onClick={() => setViewingRecord(null)} className="text-white/80 hover:text-white text-xl">×</button>
+                                </div>
+                                <div className="p-6">
+                                    {/* 数据统计 */}
+                                    <div className="grid grid-cols-3 gap-4 mb-6">
+                                        <div className="bg-purple-50 p-4 rounded-xl text-center">
+                                            <div className="text-2xl mb-1">📏</div>
+                                            <div className="text-sm text-gray-500">身高</div>
+                                            <div className="text-xl font-bold text-purple-600">{viewingRecord.height} cm</div>
+                                        </div>
+                                        <div className="bg-green-50 p-4 rounded-xl text-center">
+                                            <div className="text-2xl mb-1">⚖️</div>
+                                            <div className="text-sm text-gray-500">体重</div>
+                                            <div className="text-xl font-bold text-green-600">{viewingRecord.weight} kg</div>
+                                        </div>
+                                        <div className="bg-blue-50 p-4 rounded-xl text-center">
+                                            <div className="text-2xl mb-1">🧒</div>
+                                            <div className="text-sm text-gray-500">头围</div>
+                                            <div className="text-xl font-bold text-blue-600">{viewingRecord.head} cm</div>
+                                        </div>
+                                    </div>
+
+                                    {/* 备注 */}
+                                    {viewingRecord.note && (
+                                        <div className="mb-6">
+                                            <h4 className="text-sm font-medium text-gray-500 mb-2">📝 备注</h4>
+                                            <div className="bg-gray-50 p-3 rounded-xl text-gray-700">{viewingRecord.note}</div>
+                                        </div>
+                                    )}
+
+                                    {/* 关联媒体 */}
+                                    <div>
+                                        <h4 className="text-sm font-medium text-gray-500 mb-2">📷 相关照片/视频</h4>
+                                        {getRecordMedia(viewingRecord).length > 0 ? (
+                                            <div className="grid grid-cols-3 gap-3">
+                                                {getRecordMedia(viewingRecord).map(m => (
+                                                    <div
+                                                        key={m.id}
+                                                        className="aspect-square bg-gray-100 rounded-xl overflow-hidden cursor-pointer hover:ring-2 hover:ring-purple-400 transition-all"
+                                                        onClick={() => setLightboxImage(m)}
+                                                    >
+                                                        {m.type === 'video' ? (
+                                                            <div className="w-full h-full flex items-center justify-center bg-gray-200">
+                                                                <span className="text-3xl">🎬</span>
+                                                            </div>
+                                                        ) : (
+                                                            <img src={m.thumb || m.url} alt={m.title} className="w-full h-full object-cover" />
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="text-center py-8 text-gray-400 border border-dashed border-gray-200 rounded-xl">
+                                                暂无关联媒体
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* 操作按钮 */}
+                                    <div className="flex gap-3 mt-6">
+                                        <button
+                                            onClick={() => { setViewingRecord(null); openRecordModal(viewingRecord); }}
+                                            className="flex-1 bg-blue-600 text-white py-2 rounded-xl font-medium hover:bg-blue-700"
+                                        >
+                                            ✏️ 编辑记录
+                                        </button>
+                                        <button
+                                            onClick={() => setViewingRecord(null)}
+                                            className="flex-1 bg-gray-100 text-gray-600 py-2 rounded-xl font-medium hover:bg-gray-200"
+                                        >
+                                            关闭
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 灯箱预览 - 支持滑动切换 */}
+                    {lightboxImage && (() => {
+                        // 获取所有媒体的平铺列表用于滑动
+                        const allMedia = [...media].sort((a, b) => new Date(b.date) - new Date(a.date));
+                        const currentIndex = allMedia.findIndex(m => m.url === lightboxImage.url);
+                        const hasPrev = currentIndex > 0;
+                        const hasNext = currentIndex < allMedia.length - 1;
+
+                        const goToPrev = () => {
+                            if (hasPrev) setLightboxImage(allMedia[currentIndex - 1]);
+                        };
+                        const goToNext = () => {
+                            if (hasNext) setLightboxImage(allMedia[currentIndex + 1]);
+                        };
+
+                        // 触摸滑动处理
+                        let touchStartX = 0;
+                        let touchStartY = 0;
+                        const handleTouchStart = (e) => {
+                            touchStartX = e.touches[0].clientX;
+                            touchStartY = e.touches[0].clientY;
+                        };
+                        const handleTouchEnd = (e) => {
+                            const touchEndX = e.changedTouches[0].clientX;
+                            const touchEndY = e.changedTouches[0].clientY;
+                            const diffX = touchEndX - touchStartX;
+                            const diffY = touchEndY - touchStartY;
+
+                            // 水平滑动大于50px且大于垂直滑动才触发
+                            if (Math.abs(diffX) > 50 && Math.abs(diffX) > Math.abs(diffY)) {
+                                if (diffX > 0) goToPrev();
+                                else goToNext();
+                            }
+                        };
+
+                        return (
+                            <div
+                                className="fixed inset-0 bg-black z-[100] flex flex-col"
+                                onTouchStart={handleTouchStart}
+                                onTouchEnd={handleTouchEnd}
+                            >
+                                {/* 顶部工具栏 */}
+                                <div className="flex-shrink-0 flex items-center justify-between p-3 md:p-4 bg-black/50">
+                                    <div className="text-white text-sm md:text-base truncate flex-1 mr-4">
+                                        <span className="opacity-60">{currentIndex + 1} / {allMedia.length}</span>
+                                        <span className="mx-2">|</span>
+                                        <span>{lightboxImage.date}</span>
+                                    </div>
+                                    <button
+                                        onClick={() => setLightboxImage(null)}
+                                        className="w-10 h-10 flex items-center justify-center text-white text-2xl hover:bg-white/10 rounded-full transition-colors"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+
+                                {/* 主内容区 */}
+                                <div className="flex-1 flex items-center justify-center relative overflow-hidden">
+                                    {/* 左箭头 - 仅桌面端显示 */}
+                                    {hasPrev && (
+                                        <button
+                                            onClick={goToPrev}
+                                            className="hidden md:flex absolute left-4 z-10 w-12 h-12 items-center justify-center bg-black/50 hover:bg-black/70 text-white text-2xl rounded-full transition-all"
+                                        >
+                                            ‹
+                                        </button>
+                                    )}
+
+                                    {/* 媒体内容 */}
+                                    <div className="w-full h-full flex items-center justify-center p-2 md:p-4">
+                                        {lightboxImage.type === 'video' ? (
+                                            <video
+                                                key={lightboxImage.url}
+                                                src={lightboxImage.url}
+                                                className="max-w-full max-h-full rounded-lg"
+                                                controls
+                                                autoPlay
+                                                playsInline
+                                            />
+                                        ) : (
+                                            <img
+                                                key={lightboxImage.url}
+                                                src={lightboxImage.url}
+                                                alt={lightboxImage.title}
+                                                className="max-w-full max-h-full object-contain select-none"
+                                                draggable="false"
+                                            />
+                                        )}
+                                    </div>
+
+                                    {/* 右箭头 - 仅桌面端显示 */}
+                                    {hasNext && (
+                                        <button
+                                            onClick={goToNext}
+                                            className="hidden md:flex absolute right-4 z-10 w-12 h-12 items-center justify-center bg-black/50 hover:bg-black/70 text-white text-2xl rounded-full transition-all"
+                                        >
+                                            ›
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* 底部信息 + 移动端滑动提示 */}
+                                <div className="flex-shrink-0 p-3 md:p-4 bg-black/50 text-center">
+                                    <div className="text-white font-medium truncate">{lightboxImage.title}</div>
+                                    <div className="text-white/50 text-xs mt-1 md:hidden">
+                                        ← 左右滑动切换 →
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+                </div>
+            );
+        };
+
+        // 渲染应用
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

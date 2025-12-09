@@ -1,3 +1,6 @@
+// 设置时区为中国时区
+process.env.TZ = 'Asia/Shanghai';
+
 const express = require('express');
 const Database = require('better-sqlite3');
 const path = require('path');
@@ -411,9 +414,13 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date TEXT,
+    time TEXT,
     height REAL,
     weight REAL,
     head REAL,
+    milk_amount REAL,
+    poop TEXT,
+    pee TEXT,
     note TEXT,
     mediaIds TEXT
   );
@@ -444,6 +451,18 @@ db.exec(`
 // 数据库迁移
 try {
     db.exec(`ALTER TABLE records ADD COLUMN mediaIds TEXT DEFAULT ''`);
+} catch (e) {}
+try {
+    db.exec(`ALTER TABLE records ADD COLUMN time TEXT DEFAULT ''`);
+} catch (e) {}
+try {
+    db.exec(`ALTER TABLE records ADD COLUMN milk_amount REAL DEFAULT 0`);
+} catch (e) {}
+try {
+    db.exec(`ALTER TABLE records ADD COLUMN poop TEXT DEFAULT ''`);
+} catch (e) {}
+try {
+    db.exec(`ALTER TABLE records ADD COLUMN pee TEXT DEFAULT ''`);
 } catch (e) {}
 
 // --- Helper Functions ---
@@ -579,16 +598,16 @@ app.get('/api/records', (req, res) => {
 });
 
 app.post('/api/records', (req, res) => {
-    const { date, height, weight, head, note, mediaIds } = req.body;
-    const info = db.prepare('INSERT INTO records (date, height, weight, head, note, mediaIds) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(date, height, weight, head, note, mediaIds || '');
+    const { date, time, height, weight, head, milk_amount, poop, pee, note, mediaIds } = req.body;
+    const info = db.prepare('INSERT INTO records (date, time, height, weight, head, milk_amount, poop, pee, note, mediaIds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(date, time || '', height, weight, head, milk_amount || 0, poop || '', pee || '', note, mediaIds || '');
     res.json({ id: info.lastInsertRowid });
 });
 
 app.put('/api/records/:id', (req, res) => {
-    const { date, height, weight, head, note, mediaIds } = req.body;
-    db.prepare('UPDATE records SET date=?, height=?, weight=?, head=?, note=?, mediaIds=? WHERE id=?')
-        .run(date, height, weight, head, note, mediaIds || '', req.params.id);
+    const { date, time, height, weight, head, milk_amount, poop, pee, note, mediaIds } = req.body;
+    db.prepare('UPDATE records SET date=?, time=?, height=?, weight=?, head=?, milk_amount=?, poop=?, pee=?, note=?, mediaIds=? WHERE id=?')
+        .run(date, time || '', height, weight, head, milk_amount || 0, poop || '', pee || '', note, mediaIds || '', req.params.id);
     res.json({ success: true });
 });
 
@@ -884,7 +903,8 @@ function performBackup(backupDir) {
         const gzipped = zlib.gzipSync(tarBuffer);
 
         // 生成文件名
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const now = new Date();
+        const timestamp = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}-${String(now.getMinutes()).padStart(2,'0')}-${String(now.getSeconds()).padStart(2,'0')}`;
         const filename = `baby-backup-${timestamp}.tar.gz`;
         const filepath = path.join(backupDir, filename);
 
@@ -962,10 +982,10 @@ function getNextBackupTime(scheduleTime, scheduleDay) {
 
 // 启动定时备份
 function startAutoBackup() {
-    const enabled = getSetting('backup_enabled', 'false') === 'true';
-    const backupMode = getSetting('backup_mode', 'interval'); // 'interval' 或 'schedule'
+    const enabled = getSetting('backup_enabled', 'true') === 'true';
+    const backupMode = getSetting('backup_mode', 'schedule'); // 默认定时模式
     const interval = parseInt(getSetting('backup_interval', '24')); // 小时（间隔模式）
-    const scheduleTime = getSetting('backup_schedule_time', '00:00'); // HH:MM（定时模式）
+    const scheduleTime = getSetting('backup_schedule_time', '02:00'); // HH:MM（定时模式）
     const scheduleDay = getSetting('backup_schedule_day', 'daily'); // 'daily' 或 0-6（定时模式）
     const backupDir = getSetting('backup_path', BACKUP_PATH);
 
@@ -1021,10 +1041,10 @@ function startAutoBackup() {
 // 获取备份设置
 app.get('/api/backup/settings', (req, res) => {
     res.json({
-        enabled: getSetting('backup_enabled', 'false') === 'true',
-        mode: getSetting('backup_mode', 'interval'), // 'interval' 或 'schedule'
+        enabled: getSetting('backup_enabled', 'true') === 'true',
+        mode: getSetting('backup_mode', 'schedule'), // 默认定时模式
         interval: parseInt(getSetting('backup_interval', '24')),
-        scheduleTime: getSetting('backup_schedule_time', '00:00'),
+        scheduleTime: getSetting('backup_schedule_time', '02:00'),
         scheduleDay: getSetting('backup_schedule_day', 'daily'),
         path: getSetting('backup_path', BACKUP_PATH),
         maxCount: parseInt(getSetting('backup_max_count', '10'))
@@ -1145,6 +1165,129 @@ app.get('/api/backup/download/:filename', (req, res) => {
     res.download(filepath);
 });
 
+// 上传备份文件到备份目录（导入）
+app.post('/api/backup/upload', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+    try {
+        const backupDir = getSetting('backup_path', BACKUP_PATH);
+
+        // 确保备份目录存在
+        if (!fs.existsSync(backupDir)) {
+            fs.mkdirSync(backupDir, { recursive: true });
+        }
+
+        // 验证是否为有效的 gzip 文件
+        try {
+            zlib.gunzipSync(req.body);
+        } catch (e) {
+            return res.status(400).json({ error: '无效的备份文件格式' });
+        }
+
+        // 生成文件名
+        const now = new Date();
+        const timestamp = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}-${String(now.getMinutes()).padStart(2,'0')}-${String(now.getSeconds()).padStart(2,'0')}`;
+        const filename = `baby-backup-${timestamp}-imported.tar.gz`;
+        const filepath = path.join(backupDir, filename);
+
+        fs.writeFileSync(filepath, req.body);
+
+        res.json({ success: true, filename, message: '备份文件已导入' });
+    } catch (error) {
+        console.error('Upload error:', error);
+        res.status(500).json({ error: '导入失败: ' + error.message });
+    }
+});
+
+// 从指定备份文件恢复数据
+app.post('/api/backup/restore/:filename', (req, res) => {
+    try {
+        const backupDir = getSetting('backup_path', BACKUP_PATH);
+        const filename = req.params.filename;
+
+        // 安全检查
+        if (!filename.startsWith('baby-backup-') || !filename.endsWith('.tar.gz')) {
+            return res.status(400).json({ error: '无效的文件名' });
+        }
+
+        const filepath = path.join(backupDir, filename);
+        if (!fs.existsSync(filepath)) {
+            return res.status(404).json({ error: '文件不存在' });
+        }
+
+        // 读取并解压文件
+        const gzipped = fs.readFileSync(filepath);
+        const tarBuffer = zlib.gunzipSync(gzipped);
+        const files = parseTar(tarBuffer);
+
+        // 找到 data.json
+        const dataFile = files.find(f => f.name === 'data.json');
+        if (!dataFile) {
+            return res.status(400).json({ error: '无效的备份文件：缺少 data.json' });
+        }
+
+        const importData = JSON.parse(dataFile.content.toString('utf8'));
+
+        if (!importData.version || !importData.baby || !importData.records) {
+            return res.status(400).json({ error: '备份文件格式无效' });
+        }
+
+        // 恢复宝宝信息
+        const { name, birthDate, gender, bloodType } = importData.baby;
+        db.prepare('UPDATE baby SET name = ?, birthDate = ?, gender = ?, bloodType = ? WHERE id = 1')
+            .run(name, birthDate, gender, bloodType);
+
+        // 恢复记录
+        db.prepare('DELETE FROM records').run();
+        const insertRecord = db.prepare(
+            'INSERT INTO records (date, time, height, weight, head, milk_amount, poop, pee, note, mediaIds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        );
+        importData.records.forEach(r => {
+            insertRecord.run(r.date, r.time || '', r.height, r.weight, r.head, r.milk_amount || 0, r.poop || '', r.pee || '', r.note, r.mediaIds || '');
+        });
+
+        // 恢复媒体元数据
+        if (importData.mediaMeta?.length > 0) {
+            db.prepare('DELETE FROM media_meta').run();
+            const insertMeta = db.prepare(
+                'INSERT OR REPLACE INTO media_meta (filename, title, description, customDate) VALUES (?, ?, ?, ?)'
+            );
+            importData.mediaMeta.forEach(m => {
+                insertMeta.run(m.filename, m.title, m.description, m.customDate);
+            });
+        }
+
+        // 恢复媒体文件
+        if (!fs.existsSync(MEDIA_PATH)) {
+            fs.mkdirSync(MEDIA_PATH, { recursive: true });
+        }
+
+        let mediaRestored = 0;
+        files.filter(f => f.name.startsWith('media/')).forEach(f => {
+            const relativePath = f.name.replace('media/', '');
+            const fullPath = path.join(MEDIA_PATH, relativePath);
+            const dir = path.dirname(fullPath);
+
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(fullPath, f.content);
+            mediaRestored++;
+        });
+
+        console.log(`[恢复] 成功从 ${filename} 恢复数据`);
+
+        res.json({
+            success: true,
+            message: `恢复成功！已恢复 ${importData.records.length} 条记录`,
+            recordCount: importData.records.length,
+            mediaCount: mediaRestored
+        });
+
+    } catch (error) {
+        console.error('Restore error:', error);
+        res.status(500).json({ error: '恢复失败: ' + error.message });
+    }
+});
+
 // 删除指定备份文件
 app.delete('/api/backup/files/:filename', (req, res) => {
     const backupDir = getSetting('backup_path', BACKUP_PATH);
@@ -1157,6 +1300,13 @@ app.delete('/api/backup/files/:filename', (req, res) => {
     const filepath = path.join(backupDir, filename);
     if (fs.existsSync(filepath)) {
         fs.unlinkSync(filepath);
+
+        // 记录删除日志
+        db.prepare(
+            'INSERT INTO backup_logs (timestamp, filename, size, recordCount, mediaCount, status) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(new Date().toISOString(), filename, 0, 0, 0, 'deleted');
+
+        console.log(`[备份] 已删除: ${filename}`);
     }
 
     res.json({ success: true });

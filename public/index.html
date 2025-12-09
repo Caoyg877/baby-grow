@@ -48,7 +48,7 @@
 
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
-        const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } = Recharts;
+        const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } = Recharts;
 
         // 主应用
         const App = () => {
@@ -65,21 +65,25 @@
             const [isDemo, setIsDemo] = useState(false);
             const [authEnabled, setAuthEnabled] = useState(false);
             const [backupSettings, setBackupSettings] = useState({
-                enabled: false,
-                mode: 'interval', // 'interval' 或 'schedule'
+                enabled: true,
+                mode: 'schedule', // 默认定时模式
                 interval: 24,
-                scheduleTime: '00:00',
-                scheduleDay: 'daily', // 'daily' 或 0-6
+                scheduleTime: '02:00',
+                scheduleDay: 'daily',
                 path: './backups',
                 maxCount: 10
             });
             const [backupFiles, setBackupFiles] = useState([]);
             const [backupLogs, setBackupLogs] = useState([]);
             const [backupLoading, setBackupLoading] = useState(false);
+            const [backupEditing, setBackupEditing] = useState(false);
 
             // 图片分页状态
             const [galleryPage, setGalleryPage] = useState(1);
             const ITEMS_PER_PAGE = 50; // 每页显示数量
+
+            // 日记统计日期选择（默认今天）
+            const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
 
             // 演示数据
             const DEMO_RECORDS = [
@@ -147,24 +151,144 @@
 
             // 最新数据统计
             const stats = useMemo(() => {
-                if (records.length === 0) return { height: '-', weight: '-', head: '-', count: 0 };
-                const sorted = [...records].sort((a, b) => new Date(b.date) - new Date(a.date));
-                const latest = sorted[0];
+                if (records.length === 0) return { height: '-', weight: '-', head: '-', milk_amount: '-', count: 0, poopCount: 0, peeCount: 0, totalMilk: 0 };
+                const sorted = [...records].sort((a, b) => {
+                    const dateTimeA = `${a.date} ${a.time || '00:00'}`;
+                    const dateTimeB = `${b.date} ${b.time || '00:00'}`;
+                    return dateTimeB.localeCompare(dateTimeA);
+                });
+
+                // 查找最新的有效生长指标（可能分布在不同记录中）
+                const latestHeight = sorted.find(r => r.height > 0)?.height || '-';
+                const latestWeight = sorted.find(r => r.weight > 0)?.weight || '-';
+                const latestHead = sorted.find(r => r.head > 0)?.head || '-';
+
                 return {
-                    height: latest.height,
-                    weight: latest.weight,
-                    head: latest.head,
+                    height: latestHeight,
+                    weight: latestWeight,
+                    head: latestHead,
                     count: records.length
                 };
             }, [records]);
 
+            // 选定日期的统计数据
+            const dateStats = useMemo(() => {
+                const dateRecords = records.filter(r => r.date === selectedDate);
+                const totalMilk = dateRecords.reduce((sum, r) => sum + (r.milk_amount || 0), 0);
+                const milkCount = dateRecords.filter(r => r.milk_amount > 0).length;
+                const poopCount = dateRecords.filter(r => r.poop && r.poop !== '').length;
+                const peeCount = dateRecords.filter(r => r.pee && r.pee !== '').length;
+                return { totalMilk, milkCount, poopCount, peeCount };
+            }, [records, selectedDate]);
+
+            // 选定日期的详细记录（带间隔时间计算）
+            const dateDetails = useMemo(() => {
+                const dateRecords = records
+                    .filter(r => r.date === selectedDate && (r.milk_amount > 0 || r.poop || r.pee))
+                    .sort((a, b) => (a.time || '00:00').localeCompare(b.time || '00:00'));
+
+                // 计算间隔时间的辅助函数
+                const calcInterval = (currentTime, prevTime) => {
+                    if (!prevTime || !currentTime) return null;
+                    const [h1, m1] = currentTime.split(':').map(Number);
+                    const [h2, m2] = prevTime.split(':').map(Number);
+                    const diffMinutes = (h1 * 60 + m1) - (h2 * 60 + m2);
+                    if (diffMinutes <= 0) return null;
+                    const hours = Math.floor(diffMinutes / 60);
+                    const minutes = diffMinutes % 60;
+                    if (hours > 0) return `${hours}h${minutes > 0 ? minutes + 'm' : ''}`;
+                    return `${minutes}m`;
+                };
+
+                // 分别追踪每种类型的上一次时间
+                let lastMilkTime = null;
+                let lastPoopTime = null;
+                let lastPeeTime = null;
+
+                return dateRecords.map(r => {
+                    const detail = {
+                        id: r.id,
+                        time: r.time || '00:00',
+                        items: []
+                    };
+
+                    if (r.milk_amount > 0) {
+                        detail.items.push({
+                            type: 'milk',
+                            icon: '🍼',
+                            label: `${r.milk_amount}ml`,
+                            interval: calcInterval(r.time, lastMilkTime),
+                            color: 'pink'
+                        });
+                        lastMilkTime = r.time;
+                    }
+                    if (r.poop) {
+                        detail.items.push({
+                            type: 'poop',
+                            icon: '💩',
+                            label: r.poop,
+                            interval: calcInterval(r.time, lastPoopTime),
+                            color: 'amber'
+                        });
+                        lastPoopTime = r.time;
+                    }
+                    if (r.pee) {
+                        detail.items.push({
+                            type: 'pee',
+                            icon: '💧',
+                            label: r.pee,
+                            interval: calcInterval(r.time, lastPeeTime),
+                            color: 'cyan'
+                        });
+                        lastPeeTime = r.time;
+                    }
+
+                    return detail;
+                });
+            }, [records, selectedDate]);
+
+            // 按日期+时间排序的记录
+            const sortedRecords = useMemo(() => {
+                return [...records].sort((a, b) => {
+                    const dateTimeA = `${a.date} ${a.time || '00:00'}`;
+                    const dateTimeB = `${b.date} ${b.time || '00:00'}`;
+                    return dateTimeB.localeCompare(dateTimeA); // 降序，最新的在前
+                });
+            }, [records]);
+
+            // 获取最新的生长指标（用于新增记录时的默认值）
+            const latestGrowthData = useMemo(() => {
+                // 查找最新的有效身高记录
+                const latestHeight = sortedRecords.find(r => r.height > 0)?.height || '';
+                // 查找最新的有效体重记录
+                const latestWeight = sortedRecords.find(r => r.weight > 0)?.weight || '';
+                // 查找最新的有效头围记录
+                const latestHead = sortedRecords.find(r => r.head > 0)?.head || '';
+                return { height: latestHeight, weight: latestWeight, head: latestHead };
+            }, [sortedRecords]);
+
             // 保存记录
             const handleSave = async (formData) => {
+                const date = formData.get('date');
+                const time = formData.get('time') || '';
+
+                // 时间校验：不能是未来时间
+                const now = new Date();
+                const recordDateTime = new Date(`${date}T${time || '23:59'}`);
+                if (recordDateTime > now) {
+                    alert('⚠️ 记录时间不能是未来时间');
+                    return;
+                }
+
                 const newRecord = {
-                    date: formData.get('date'),
+                    date,
+                    time,
                     height: parseFloat(formData.get('height')) || 0,
                     weight: parseFloat(formData.get('weight')) || 0,
                     head: parseFloat(formData.get('head')) || 0,
+                    milk_amount: parseFloat(formData.get('milk_amount')) || 0,
+                    poop: formData.get('poop') || '',
+                    pee: formData.get('pee') || '',
                     note: formData.get('note') || '',
                     mediaIds: selectedMediaIds.join(',')
                 };
@@ -384,7 +508,7 @@
                                 </div>
                             </div>
                             {/* 桌面端导航按钮 */}
-                            <div className="hidden md:flex gap-2">
+                            <div className="hidden md:flex gap-2 items-center">
                                 {['dashboard', 'records', 'gallery', 'settings'].map(v => (
                                     <button
                                         key={v}
@@ -398,6 +522,14 @@
                                         {v === 'dashboard' ? '📊 看板' : v === 'records' ? '📋 记录' : v === 'gallery' ? '🖼️ 相册' : '⚙️ 设置'}
                                     </button>
                                 ))}
+                                {authEnabled && (
+                                    <button
+                                        onClick={handleLogout}
+                                        className="px-3 py-2 rounded-lg text-sm font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-all ml-2"
+                                    >
+                                        退出
+                                    </button>
+                                )}
                             </div>
                         </div>
                         {isDemo && (
@@ -442,43 +574,173 @@
                         {/* 看板视图 */}
                         {view === 'dashboard' && (
                             <div className="space-y-4 md:space-y-6">
-                                {/* 统计卡片 - 移动端2x2网格，更紧凑 */}
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
-                                    <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
-                                        <div className="text-2xl md:text-3xl mb-1 md:mb-2">📏</div>
-                                        <div className="text-xs md:text-sm text-gray-500">最新身高</div>
-                                        <div className="text-xl md:text-2xl font-bold text-purple-600">{stats.height} <span className="text-xs md:text-sm font-normal">cm</span></div>
-                                    </div>
-                                    <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
-                                        <div className="text-2xl md:text-3xl mb-1 md:mb-2">⚖️</div>
-                                        <div className="text-xs md:text-sm text-gray-500">最新体重</div>
-                                        <div className="text-xl md:text-2xl font-bold text-green-600">{stats.weight} <span className="text-xs md:text-sm font-normal">kg</span></div>
-                                    </div>
-                                    <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
-                                        <div className="text-2xl md:text-3xl mb-1 md:mb-2">🧒</div>
-                                        <div className="text-xs md:text-sm text-gray-500">最新头围</div>
-                                        <div className="text-xl md:text-2xl font-bold text-blue-600">{stats.head} <span className="text-xs md:text-sm font-normal">cm</span></div>
-                                    </div>
-                                    <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
-                                        <div className="text-2xl md:text-3xl mb-1 md:mb-2">📝</div>
-                                        <div className="text-xs md:text-sm text-gray-500">记录次数</div>
-                                        <div className="text-xl md:text-2xl font-bold text-orange-600">{stats.count} <span className="text-xs md:text-sm font-normal">次</span></div>
+                                {/* 生长指标统计卡片 */}
+                                <div>
+                                    <h3 className="text-sm font-medium text-gray-600 mb-2 px-1">📊 生长指标</h3>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
+                                        <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
+                                            <div className="text-2xl md:text-3xl mb-1 md:mb-2">📏</div>
+                                            <div className="text-xs md:text-sm text-gray-500">最新身高</div>
+                                            <div className="text-xl md:text-2xl font-bold text-purple-600">{stats.height} <span className="text-xs md:text-sm font-normal">cm</span></div>
+                                        </div>
+                                        <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
+                                            <div className="text-2xl md:text-3xl mb-1 md:mb-2">⚖️</div>
+                                            <div className="text-xs md:text-sm text-gray-500">最新体重</div>
+                                            <div className="text-xl md:text-2xl font-bold text-green-600">{stats.weight} <span className="text-xs md:text-sm font-normal">kg</span></div>
+                                        </div>
+                                        <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
+                                            <div className="text-2xl md:text-3xl mb-1 md:mb-2">🧒</div>
+                                            <div className="text-xs md:text-sm text-gray-500">最新头围</div>
+                                            <div className="text-xl md:text-2xl font-bold text-blue-600">{stats.head} <span className="text-xs md:text-sm font-normal">cm</span></div>
+                                        </div>
+                                        <div className="card stat-card rounded-xl md:rounded-2xl p-3 md:p-5">
+                                            <div className="text-2xl md:text-3xl mb-1 md:mb-2">📝</div>
+                                            <div className="text-xs md:text-sm text-gray-500">记录次数</div>
+                                            <div className="text-xl md:text-2xl font-bold text-orange-600">{stats.count} <span className="text-xs md:text-sm font-normal">次</span></div>
+                                        </div>
                                     </div>
                                 </div>
 
-                                {/* 成长曲线图 - 移动端高度调整 */}
+                                {/* 日记统计卡片 - 支持日期选择 */}
+                                <div className="card rounded-xl md:rounded-2xl p-4 md:p-6">
+                                    {/* 标题和日期选择器 */}
+                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+                                        <h3 className="text-base md:text-lg font-bold text-gray-800">📅 日记统计</h3>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => {
+                                                    const prev = new Date(selectedDate);
+                                                    prev.setDate(prev.getDate() - 1);
+                                                    setSelectedDate(prev.toISOString().split('T')[0]);
+                                                }}
+                                                className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600"
+                                            >
+                                                ‹
+                                            </button>
+                                            <input
+                                                type="date"
+                                                value={selectedDate}
+                                                onChange={(e) => setSelectedDate(e.target.value)}
+                                                max={new Date().toISOString().split('T')[0]}
+                                                className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
+                                            />
+                                            <button
+                                                onClick={() => {
+                                                    const next = new Date(selectedDate);
+                                                    next.setDate(next.getDate() + 1);
+                                                    const today = new Date().toISOString().split('T')[0];
+                                                    if (next.toISOString().split('T')[0] <= today) {
+                                                        setSelectedDate(next.toISOString().split('T')[0]);
+                                                    }
+                                                }}
+                                                disabled={selectedDate >= new Date().toISOString().split('T')[0]}
+                                                className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                                            >
+                                                ›
+                                            </button>
+                                            <button
+                                                onClick={() => setSelectedDate(new Date().toISOString().split('T')[0])}
+                                                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                                                    selectedDate === new Date().toISOString().split('T')[0]
+                                                        ? 'bg-purple-600 text-white'
+                                                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                                }`}
+                                            >
+                                                今天
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* 统计数据 */}
+                                    <div className="grid grid-cols-4 gap-2 md:gap-4 mb-4">
+                                        <div className="bg-pink-50 rounded-xl p-2.5 md:p-4 text-center">
+                                            <div className="text-lg md:text-2xl mb-0.5 md:mb-1">🍼</div>
+                                            <div className="text-[10px] md:text-xs text-gray-500">奶量</div>
+                                            <div className="text-base md:text-xl font-bold text-pink-600">{dateStats.totalMilk}<span className="text-[10px] md:text-xs font-normal ml-0.5">ml</span></div>
+                                        </div>
+                                        <div className="bg-rose-50 rounded-xl p-2.5 md:p-4 text-center">
+                                            <div className="text-lg md:text-2xl mb-0.5 md:mb-1">🧮</div>
+                                            <div className="text-[10px] md:text-xs text-gray-500">吃奶</div>
+                                            <div className="text-base md:text-xl font-bold text-rose-600">{dateStats.milkCount}<span className="text-[10px] md:text-xs font-normal ml-0.5">次</span></div>
+                                        </div>
+                                        <div className="bg-amber-50 rounded-xl p-2.5 md:p-4 text-center">
+                                            <div className="text-lg md:text-2xl mb-0.5 md:mb-1">💩</div>
+                                            <div className="text-[10px] md:text-xs text-gray-500">大便</div>
+                                            <div className="text-base md:text-xl font-bold text-amber-600">{dateStats.poopCount}<span className="text-[10px] md:text-xs font-normal ml-0.5">次</span></div>
+                                        </div>
+                                        <div className="bg-cyan-50 rounded-xl p-2.5 md:p-4 text-center">
+                                            <div className="text-lg md:text-2xl mb-0.5 md:mb-1">💧</div>
+                                            <div className="text-[10px] md:text-xs text-gray-500">小便</div>
+                                            <div className="text-base md:text-xl font-bold text-cyan-600">{dateStats.peeCount}<span className="text-[10px] md:text-xs font-normal ml-0.5">次</span></div>
+                                        </div>
+                                    </div>
+
+                                    {/* 详细时间轴 */}
+                                    {dateDetails.length > 0 ? (
+                                        <div className="border-t border-gray-100 pt-4">
+                                            <h4 className="text-sm font-medium text-gray-600 mb-3">⏰ 详细记录</h4>
+                                            <div className="relative">
+                                                {/* 时间轴线 */}
+                                                <div className="absolute left-[22px] top-2 bottom-2 w-0.5 bg-gray-200"></div>
+
+                                                <div className="space-y-3">
+                                                    {dateDetails.map((detail, idx) => (
+                                                        <div key={detail.id} className="relative flex items-start gap-3">
+                                                            {/* 时间点 */}
+                                                            <div className="flex-shrink-0 w-11 text-right">
+                                                                <span className="text-xs font-medium text-gray-600">{detail.time}</span>
+                                                            </div>
+                                                            {/* 圆点 */}
+                                                            <div className="flex-shrink-0 w-3 h-3 mt-0.5 rounded-full bg-purple-400 border-2 border-white shadow-sm z-10"></div>
+                                                            {/* 内容 */}
+                                                            <div className="flex-1 flex flex-wrap gap-2">
+                                                                {detail.items.map((item, i) => (
+                                                                    <div
+                                                                        key={i}
+                                                                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
+                                                                        style={{
+                                                                            backgroundColor: { pink: '#fce7f3', amber: '#fef3c7', cyan: '#cffafe' }[item.color],
+                                                                            color: { pink: '#be185d', amber: '#b45309', cyan: '#0e7490' }[item.color]
+                                                                        }}
+                                                                    >
+                                                                        <span>{item.icon}</span>
+                                                                        <span>{item.label}</span>
+                                                                        {item.interval && (
+                                                                            <>
+                                                                                <span className="opacity-40">|</span>
+                                                                                <span className="bg-white/60 px-1.5 py-0.5 rounded text-[11px] font-semibold">
+                                                                                    ⏱{item.interval}
+                                                                                </span>
+                                                                            </>
+                                                                        )}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="border-t border-gray-100 pt-4 text-center text-gray-400 text-sm py-6">
+                                            📭 该日期暂无喂养/排泄记录
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* 成长曲线图 */}
                                 <div className="card rounded-xl md:rounded-2xl p-4 md:p-6">
                                     <h3 className="text-base md:text-lg font-bold text-gray-800 mb-3 md:mb-4">📈 成长曲线</h3>
                                     <div className="h-56 md:h-80">
                                         <ResponsiveContainer width="100%" height="100%">
-                                            <LineChart data={[...records].sort((a,b) => new Date(a.date) - new Date(b.date))}>
+                                            <LineChart data={[...records].filter(r => r.height > 0 || r.weight > 0).sort((a,b) => new Date(a.date) - new Date(b.date))}>
                                                 <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
                                                 <XAxis dataKey="date" tick={{fontSize: 10}} interval="preserveStartEnd" />
                                                 <YAxis yAxisId="left" orientation="left" tick={{fontSize: 10}} width={35} />
                                                 <YAxis yAxisId="right" orientation="right" tick={{fontSize: 10}} width={35} />
                                                 <Tooltip />
-                                                <Line yAxisId="left" type="monotone" dataKey="height" stroke="#8b5cf6" strokeWidth={2} dot={{fill: '#8b5cf6', r: 3}} name="身高(cm)" />
-                                                <Line yAxisId="right" type="monotone" dataKey="weight" stroke="#10b981" strokeWidth={2} dot={{fill: '#10b981', r: 3}} name="体重(kg)" />
+                                                <Line yAxisId="left" type="monotone" dataKey="height" stroke="#8b5cf6" strokeWidth={2} dot={{fill: '#8b5cf6', r: 3}} name="身高(cm)" connectNulls />
+                                                <Line yAxisId="right" type="monotone" dataKey="weight" stroke="#10b981" strokeWidth={2} dot={{fill: '#10b981', r: 3}} name="体重(kg)" connectNulls />
                                             </LineChart>
                                         </ResponsiveContainer>
                                     </div>
@@ -488,15 +750,18 @@
                                 <div className="card rounded-xl md:rounded-2xl p-4 md:p-6">
                                     <h3 className="text-base md:text-lg font-bold text-gray-800 mb-3 md:mb-4">🕐 最近记录</h3>
                                     <div className="space-y-2 md:space-y-3">
-                                        {[...records].sort((a,b) => new Date(b.date) - new Date(a.date)).slice(0, 5).map(r => (
+                                        {sortedRecords.slice(0, 5).map(r => (
                                             <div key={r.id} className="flex items-center justify-between p-2 md:p-3 bg-gray-50 rounded-lg md:rounded-xl">
                                                 <div className="min-w-0 flex-1">
-                                                    <div className="font-medium text-gray-800 text-sm md:text-base">{r.date}</div>
+                                                    <div className="font-medium text-gray-800 text-sm md:text-base">
+                                                        {r.date} {r.time && <span className="text-gray-400">{r.time}</span>}
+                                                    </div>
                                                     <div className="text-xs md:text-sm text-gray-500 truncate">{r.note || '无备注'}</div>
                                                 </div>
-                                                <div className="text-right text-xs md:text-sm ml-2 flex-shrink-0">
-                                                    <div className="text-purple-600">{r.height}cm</div>
-                                                    <div className="text-green-600">{r.weight}kg</div>
+                                                <div className="text-right text-xs md:text-sm ml-2 flex-shrink-0 space-y-0.5">
+                                                    {r.height > 0 && <div className="text-purple-600">{r.height}cm</div>}
+                                                    {r.weight > 0 && <div className="text-green-600">{r.weight}kg</div>}
+                                                    {r.milk_amount > 0 && <div className="text-pink-600">{r.milk_amount}ml</div>}
                                                 </div>
                                             </div>
                                         ))}
@@ -525,7 +790,7 @@
 
                                         {/* 记录列表 */}
                                         <div className="space-y-4 md:space-y-6">
-                                            {[...records].sort((a,b) => new Date(b.date) - new Date(a.date)).map((r, index) => {
+                                            {sortedRecords.map((r, index) => {
                                                 const recordMedia = getRecordMedia(r);
                                                 const dateObj = new Date(r.date);
                                                 const month = dateObj.getMonth() + 1;
@@ -550,7 +815,7 @@
                                                             <div className="flex items-center justify-between mb-3">
                                                                 <div className="flex items-center gap-2">
                                                                     <div className="bg-purple-100 text-purple-700 px-2 py-1 rounded-lg text-xs md:text-sm font-medium">
-                                                                        {month}月{day}日
+                                                                        {month}月{day}日 {r.time && <span className="text-purple-500">{r.time}</span>}
                                                                     </div>
                                                                     <span className="text-gray-400 text-xs">{year}年</span>
                                                                     {index === 0 && (
@@ -566,21 +831,46 @@
 
                                                             {/* 数据展示 */}
                                                             <div className="flex flex-wrap gap-3 md:gap-4 mb-2">
-                                                                <div className="flex items-center gap-1.5">
-                                                                    <span className="text-lg">📏</span>
-                                                                    <span className="text-purple-600 font-bold">{r.height}</span>
-                                                                    <span className="text-gray-400 text-sm">cm</span>
-                                                                </div>
-                                                                <div className="flex items-center gap-1.5">
-                                                                    <span className="text-lg">⚖️</span>
-                                                                    <span className="text-green-600 font-bold">{r.weight}</span>
-                                                                    <span className="text-gray-400 text-sm">kg</span>
-                                                                </div>
-                                                                <div className="flex items-center gap-1.5">
-                                                                    <span className="text-lg">🧒</span>
-                                                                    <span className="text-blue-600 font-bold">{r.head}</span>
-                                                                    <span className="text-gray-400 text-sm">cm</span>
-                                                                </div>
+                                                                {r.height > 0 && (
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        <span className="text-lg">📏</span>
+                                                                        <span className="text-purple-600 font-bold">{r.height}</span>
+                                                                        <span className="text-gray-400 text-sm">cm</span>
+                                                                    </div>
+                                                                )}
+                                                                {r.weight > 0 && (
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        <span className="text-lg">⚖️</span>
+                                                                        <span className="text-green-600 font-bold">{r.weight}</span>
+                                                                        <span className="text-gray-400 text-sm">kg</span>
+                                                                    </div>
+                                                                )}
+                                                                {r.head > 0 && (
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        <span className="text-lg">🧒</span>
+                                                                        <span className="text-blue-600 font-bold">{r.head}</span>
+                                                                        <span className="text-gray-400 text-sm">cm</span>
+                                                                    </div>
+                                                                )}
+                                                                {r.milk_amount > 0 && (
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        <span className="text-lg">🍼</span>
+                                                                        <span className="text-pink-600 font-bold">{r.milk_amount}</span>
+                                                                        <span className="text-gray-400 text-sm">ml</span>
+                                                                    </div>
+                                                                )}
+                                                                {r.poop && (
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        <span className="text-lg">💩</span>
+                                                                        <span className="text-amber-600 font-medium">{r.poop}</span>
+                                                                    </div>
+                                                                )}
+                                                                {r.pee && (
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        <span className="text-lg">💧</span>
+                                                                        <span className="text-cyan-600 font-medium">{r.pee}</span>
+                                                                    </div>
+                                                                )}
                                                             </div>
 
                                                             {/* 备注 */}
@@ -740,232 +1030,65 @@
                         {/* 设置视图 */}
                         {view === 'settings' && (
                             <div className="space-y-6">
-                                {/* 账户安全区域 - 仅在认证启用时显示 */}
-                                {authEnabled && (
-                                    <div className="card rounded-2xl p-4 flex items-center justify-between">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center text-xl">🔐</div>
-                                            <div>
-                                                <div className="font-medium text-gray-800">已登录</div>
-                                                <div className="text-sm text-gray-500">身份验证已启用</div>
-                                            </div>
-                                        </div>
-                                        <button
-                                            onClick={handleLogout}
-                                            className="bg-red-500 text-white px-4 py-2 rounded-xl font-medium hover:bg-red-600 text-sm"
-                                        >
-                                            🚪 退出登录
-                                        </button>
-                                    </div>
-                                )}
-
-                                <div className="grid md:grid-cols-2 gap-6">
-                                {/* 左侧：宝宝档案设置 */}
-                                <div className="card rounded-2xl p-6">
-                                    <h3 className="text-lg font-bold text-gray-800 mb-6">⚙️ 宝宝档案设置</h3>
+                                {/* 宝宝档案设置 */}
+                                <div className="card rounded-2xl p-4 md:p-6">
+                                    <h3 className="text-base md:text-lg font-bold text-gray-800 mb-4">👶 宝宝档案</h3>
                                     <form onSubmit={(e) => { e.preventDefault(); handleUpdateBaby(new FormData(e.target)); }}>
-                                        <div className="space-y-4">
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">宝宝昵称</label>
-                                                <input name="name" defaultValue={baby.name} className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none" />
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">出生日期</label>
-                                                <input type="date" name="birthDate" defaultValue={baby.birthDate} className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none" />
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-4">
+                                        <div className="grid md:grid-cols-2 gap-4">
+                                            <div className="grid grid-cols-2 gap-3">
                                                 <div>
-                                                    <label className="block text-sm font-medium text-gray-700 mb-1">性别</label>
-                                                    <select name="gender" defaultValue={baby.gender} className="w-full p-3 border border-gray-200 rounded-xl outline-none">
+                                                    <label className="block text-xs font-medium text-gray-600 mb-1">昵称</label>
+                                                    <input name="name" defaultValue={baby.name} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs font-medium text-gray-600 mb-1">出生日期</label>
+                                                    <input type="date" name="birthDate" defaultValue={baby.birthDate} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none" />
+                                                </div>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div>
+                                                    <label className="block text-xs font-medium text-gray-600 mb-1">性别</label>
+                                                    <select name="gender" defaultValue={baby.gender} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none">
                                                         <option value="male">男宝宝</option>
                                                         <option value="female">女宝宝</option>
                                                     </select>
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm font-medium text-gray-700 mb-1">血型</label>
-                                                    <input name="bloodType" defaultValue={baby.bloodType} className="w-full p-3 border border-gray-200 rounded-xl outline-none" />
+                                                    <label className="block text-xs font-medium text-gray-600 mb-1">血型</label>
+                                                    <input name="bloodType" defaultValue={baby.bloodType} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none" />
                                                 </div>
                                             </div>
-                                            <button className="w-full bg-purple-600 text-white py-3 rounded-xl font-medium hover:bg-purple-700 mt-4">
-                                                💾 保存设置
-                                            </button>
+                                            <div className="md:col-span-2">
+                                                <button className="w-full md:w-auto bg-purple-600 text-white px-6 py-2.5 rounded-lg font-medium hover:bg-purple-700 text-sm">
+                                                    💾 保存档案
+                                                </button>
+                                            </div>
                                         </div>
                                     </form>
                                 </div>
 
-                                {/* 右侧：自动备份设置 */}
-                                <div className="card rounded-2xl p-6">
-                                    <h3 className="text-lg font-bold text-gray-800 mb-6">🔄 自动备份设置</h3>
-
-                                    {isDemo ? (
-                                        <div className="text-center py-8 text-gray-400">
-                                            <div className="text-4xl mb-2">🔒</div>
-                                            <p>连接到服务器后可配置自动备份</p>
-                                        </div>
-                                    ) : (
-                                        <div className="space-y-4">
-                                            {/* 启用开关 */}
-                                            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl">
-                                                <div>
-                                                    <div className="font-medium text-gray-800">启用自动备份</div>
-                                                    <div className="text-xs text-gray-500">按设定周期自动备份数据</div>
-                                                </div>
-                                                <button
-                                                    onClick={() => handleUpdateBackupSettings({...backupSettings, enabled: !backupSettings.enabled})}
-                                                    className={`w-14 h-7 rounded-full transition-colors relative ${backupSettings.enabled ? 'bg-green-500' : 'bg-gray-300'}`}
-                                                >
-                                                    <div className={`w-5 h-5 bg-white rounded-full absolute top-1 transition-transform ${backupSettings.enabled ? 'translate-x-8' : 'translate-x-1'}`}></div>
-                                                </button>
-                                            </div>
-
-                                            {/* 备份模式选择 */}
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-2">备份模式</label>
-                                                <div className="grid grid-cols-2 gap-2">
-                                                    <button
-                                                        onClick={() => setBackupSettings(prev => ({...prev, mode: 'interval'}))}
-                                                        className={`p-2 rounded-lg text-sm font-medium transition-all ${
-                                                            backupSettings.mode === 'interval'
-                                                                ? 'bg-purple-600 text-white'
-                                                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                                        }`}
-                                                    >
-                                                        ⏱️ 间隔模式
-                                                    </button>
-                                                    <button
-                                                        onClick={() => setBackupSettings(prev => ({...prev, mode: 'schedule'}))}
-                                                        className={`p-2 rounded-lg text-sm font-medium transition-all ${
-                                                            backupSettings.mode === 'schedule'
-                                                                ? 'bg-purple-600 text-white'
-                                                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                                        }`}
-                                                    >
-                                                        📅 定时模式
-                                                    </button>
-                                                </div>
-                                            </div>
-
-                                            {/* 间隔模式设置 */}
-                                            {backupSettings.mode === 'interval' && (
-                                                <div>
-                                                    <label className="block text-sm font-medium text-gray-700 mb-1">备份间隔</label>
-                                                    <select
-                                                        value={backupSettings.interval}
-                                                        onChange={(e) => setBackupSettings(prev => ({...prev, interval: parseInt(e.target.value)}))}
-                                                        className="w-full p-3 border border-gray-200 rounded-xl outline-none"
-                                                    >
-                                                        <option value="1">每 1 小时</option>
-                                                        <option value="6">每 6 小时</option>
-                                                        <option value="12">每 12 小时</option>
-                                                        <option value="24">每 24 小时</option>
-                                                        <option value="48">每 48 小时</option>
-                                                        <option value="168">每 7 天</option>
-                                                    </select>
-                                                </div>
-                                            )}
-
-                                            {/* 定时模式设置 */}
-                                            {backupSettings.mode === 'schedule' && (
-                                                <div className="space-y-3">
-                                                    <div>
-                                                        <label className="block text-sm font-medium text-gray-700 mb-1">执行周期</label>
-                                                        <select
-                                                            value={backupSettings.scheduleDay}
-                                                            onChange={(e) => setBackupSettings(prev => ({...prev, scheduleDay: e.target.value}))}
-                                                            className="w-full p-3 border border-gray-200 rounded-xl outline-none"
-                                                        >
-                                                            <option value="daily">每天</option>
-                                                            <option value="0">每周日</option>
-                                                            <option value="1">每周一</option>
-                                                            <option value="2">每周二</option>
-                                                            <option value="3">每周三</option>
-                                                            <option value="4">每周四</option>
-                                                            <option value="5">每周五</option>
-                                                            <option value="6">每周六</option>
-                                                        </select>
-                                                    </div>
-                                                    <div>
-                                                        <label className="block text-sm font-medium text-gray-700 mb-1">执行时间</label>
-                                                        <input
-                                                            type="time"
-                                                            value={backupSettings.scheduleTime}
-                                                            onChange={(e) => setBackupSettings(prev => ({...prev, scheduleTime: e.target.value}))}
-                                                            className="w-full p-3 border border-gray-200 rounded-xl outline-none"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {/* 备份路径 */}
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">备份存储路径</label>
-                                                <input
-                                                    type="text"
-                                                    value={backupSettings.path}
-                                                    onChange={(e) => setBackupSettings(prev => ({...prev, path: e.target.value}))}
-                                                    className="w-full p-3 border border-gray-200 rounded-xl outline-none"
-                                                    placeholder="./backups"
-                                                />
-                                            </div>
-
-                                            {/* 保留数量 */}
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">最多保留备份数</label>
-                                                <select
-                                                    value={backupSettings.maxCount}
-                                                    onChange={(e) => setBackupSettings(prev => ({...prev, maxCount: parseInt(e.target.value)}))}
-                                                    className="w-full p-3 border border-gray-200 rounded-xl outline-none"
-                                                >
-                                                    <option value="5">保留 5 个</option>
-                                                    <option value="10">保留 10 个</option>
-                                                    <option value="20">保留 20 个</option>
-                                                    <option value="50">保留 50 个</option>
-                                                </select>
-                                            </div>
-
-                                            {/* 保存按钮和立即备份 */}
-                                            <div className="grid grid-cols-2 gap-3 pt-2">
-                                                <button
-                                                    onClick={() => handleUpdateBackupSettings(backupSettings)}
-                                                    className="bg-purple-600 text-white py-2 rounded-xl font-medium hover:bg-purple-700 text-sm"
-                                                >
-                                                    💾 保存设置
-                                                </button>
+                                {/* 备份管理 - 全宽大卡片 */}
+                                {!isDemo && (
+                                    <div className="card rounded-2xl p-4 md:p-6">
+                                        {/* 标题行：标题 + 操作按钮 */}
+                                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+                                            <h3 className="text-base md:text-lg font-bold text-gray-800">🔄 备份管理</h3>
+                                            <div className="flex flex-wrap gap-2">
                                                 <button
                                                     onClick={handleManualBackup}
                                                     disabled={backupLoading}
-                                                    className="bg-orange-500 text-white py-2 rounded-xl font-medium hover:bg-orange-600 text-sm disabled:bg-gray-400"
+                                                    className="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-orange-600 disabled:bg-gray-400"
                                                 >
                                                     {backupLoading ? '⏳ 备份中...' : '🚀 立即备份'}
                                                 </button>
-                                            </div>
-
-                                            {/* 备份状态指示 */}
-                                            <div className={`text-center text-xs py-2 rounded-lg ${backupSettings.enabled ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-400'}`}>
-                                                {backupSettings.enabled
-                                                    ? (backupSettings.mode === 'schedule'
-                                                        ? `✅ 自动备份已启用，${backupSettings.scheduleDay === 'daily' ? '每天' : `每${['周日','周一','周二','周三','周四','周五','周六'][parseInt(backupSettings.scheduleDay)]}`} ${backupSettings.scheduleTime} 执行`
-                                                        : `✅ 自动备份已启用，每 ${backupSettings.interval} 小时执行一次`)
-                                                    : '⏸️ 自动备份已禁用'}
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-
-                                {/* 备份文件列表（全宽） */}
-                                {!isDemo && (
-                                    <div className="card rounded-2xl p-6 md:col-span-2">
-                                        <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-3 mb-4">
-                                            <h3 className="text-lg font-bold text-gray-800">📁 备份文件管理</h3>
-                                            <div className="flex flex-wrap gap-2">
                                                 <a
                                                     href="/api/export"
-                                                    className="bg-green-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-green-700 flex items-center gap-1"
+                                                    className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-green-700"
                                                 >
-                                                    📤 导出备份
+                                                    📤 导出
                                                 </a>
-                                                <label className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-blue-700 cursor-pointer flex items-center gap-1">
-                                                    📥 导入备份
+                                                <label className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 cursor-pointer">
+                                                    📥 导入
                                                     <input
                                                         type="file"
                                                         accept=".tar.gz,.tgz"
@@ -973,24 +1096,17 @@
                                                         onChange={async (e) => {
                                                             const file = e.target.files[0];
                                                             if (!file) return;
-
-                                                            if (!confirm('导入将覆盖现有数据，确定继续吗？')) {
-                                                                e.target.value = '';
-                                                                return;
-                                                            }
-
                                                             try {
                                                                 const arrayBuffer = await file.arrayBuffer();
-                                                                const res = await fetch('/api/import', {
+                                                                const res = await fetch('/api/backup/upload', {
                                                                     method: 'POST',
                                                                     headers: { 'Content-Type': 'application/gzip' },
                                                                     body: arrayBuffer
                                                                 });
                                                                 const result = await res.json();
-
                                                                 if (result.success) {
-                                                                    alert(`✅ ${result.message}`);
-                                                                    window.location.reload();
+                                                                    alert(`✅ ${result.message}\n文件: ${result.filename}`);
+                                                                    loadBackupSettings();
                                                                 } else {
                                                                     alert(`❌ ${result.error}`);
                                                                 }
@@ -1003,67 +1119,217 @@
                                                 </label>
                                                 <button
                                                     onClick={loadBackupSettings}
-                                                    className="bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-gray-200 flex items-center gap-1"
+                                                    className="bg-gray-100 text-gray-600 px-3 py-2 rounded-lg text-sm font-medium hover:bg-gray-200"
+                                                    title="刷新"
                                                 >
-                                                    🔄 刷新
+                                                    🔄
                                                 </button>
                                             </div>
                                         </div>
 
-                                        {backupFiles.length > 0 ? (
-                                            <div className="overflow-x-auto">
-                                                <table className="w-full">
-                                                    <thead>
-                                                        <tr className="border-b border-gray-200">
-                                                            <th className="text-left p-2 text-sm font-medium text-gray-500">文件名</th>
-                                                            <th className="text-left p-2 text-sm font-medium text-gray-500">大小</th>
-                                                            <th className="text-left p-2 text-sm font-medium text-gray-500">创建时间</th>
-                                                            <th className="text-right p-2 text-sm font-medium text-gray-500">操作</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {backupFiles.map(f => (
-                                                            <tr key={f.filename} className="border-b border-gray-100 hover:bg-gray-50">
-                                                                <td className="p-2 text-gray-800 text-sm font-mono">{f.filename}</td>
-                                                                <td className="p-2 text-gray-500 text-sm">{(f.size / 1024).toFixed(1)} KB</td>
-                                                                <td className="p-2 text-gray-500 text-sm">{new Date(f.created).toLocaleString()}</td>
-                                                                <td className="p-2 text-right">
-                                                                    <a
-                                                                        href={`/api/backup/download/${f.filename}`}
-                                                                        className="text-blue-600 hover:text-blue-800 mr-3 text-sm"
+                                        {/* 自动备份状态卡片 - 全宽 */}
+                                        <div className={`rounded-xl p-4 border mb-6 ${backupSettings.enabled ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'}`}>
+                                            {/* 状态头部 */}
+                                            <div className="flex items-center justify-between mb-3">
+                                                <div className="flex items-center gap-2">
+                                                    <div className={`w-2 h-2 rounded-full ${backupSettings.enabled ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
+                                                    <span className={`font-medium ${backupSettings.enabled ? 'text-green-700' : 'text-gray-600'}`}>
+                                                        {backupSettings.enabled ? '自动备份已启用' : '自动备份已关闭'}
+                                                    </span>
+                                                </div>
+                                                <button
+                                                    onClick={() => setBackupEditing(!backupEditing)}
+                                                    className={`text-sm font-medium ${backupSettings.enabled ? 'text-green-600 hover:text-green-800' : 'text-gray-500 hover:text-gray-700'}`}
+                                                >
+                                                    {backupEditing ? '收起' : '✏️ 编辑'}
+                                                </button>
+                                            </div>
+
+                                            {/* 参数展示 - 卡片式布局 */}
+                                            {backupSettings.enabled && !backupEditing && (
+                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                                    <div className="bg-white/70 rounded-lg p-2.5 text-center">
+                                                        <div className="text-xs text-gray-500 mb-0.5">执行周期</div>
+                                                        <div className="text-sm font-medium text-gray-800">
+                                                            {backupSettings.scheduleDay === 'daily' ? '每天' : `每${['周日','周一','周二','周三','周四','周五','周六'][parseInt(backupSettings.scheduleDay)]}`}
+                                                        </div>
+                                                    </div>
+                                                    <div className="bg-white/70 rounded-lg p-2.5 text-center">
+                                                        <div className="text-xs text-gray-500 mb-0.5">执行时间</div>
+                                                        <div className="text-sm font-medium text-gray-800">{backupSettings.scheduleTime}</div>
+                                                    </div>
+                                                    <div className="bg-white/70 rounded-lg p-2.5 text-center">
+                                                        <div className="text-xs text-gray-500 mb-0.5">备份路径</div>
+                                                        <div className="text-sm font-medium text-gray-800 truncate" title={backupSettings.path}>{backupSettings.path}</div>
+                                                    </div>
+                                                    <div className="bg-white/70 rounded-lg p-2.5 text-center">
+                                                        <div className="text-xs text-gray-500 mb-0.5">保留数量</div>
+                                                        <div className="text-sm font-medium text-gray-800">{backupSettings.maxCount} 个</div>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* 编辑表单 - 折叠显示 */}
+                                            {backupEditing && (
+                                                <div className="space-y-3">
+                                                    {/* 启用/禁用开关 */}
+                                                    <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200">
+                                                        <div>
+                                                            <div className="text-sm font-medium text-gray-700">启用自动备份</div>
+                                                            <div className="text-xs text-gray-500">定时自动创建数据备份</div>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => setBackupSettings(prev => ({...prev, enabled: !prev.enabled}))}
+                                                            className={`relative w-12 h-6 rounded-full transition-colors ${backupSettings.enabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                                                        >
+                                                            <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all ${backupSettings.enabled ? 'left-7' : 'left-1'}`}></div>
+                                                        </button>
+                                                    </div>
+
+                                                    {/* 其他设置项 - 仅在启用时显示 */}
+                                                    {backupSettings.enabled && (
+                                                        <>
+                                                            <div className="grid grid-cols-2 gap-3">
+                                                                <div>
+                                                                    <label className="block text-xs font-medium text-gray-600 mb-1">执行周期</label>
+                                                                    <select
+                                                                        value={backupSettings.scheduleDay}
+                                                                        onChange={(e) => setBackupSettings(prev => ({...prev, scheduleDay: e.target.value}))}
+                                                                        className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none bg-white"
                                                                     >
-                                                                        ⬇️ 下载
-                                                                    </a>
-                                                                    <button
-                                                                        onClick={() => handleDeleteBackup(f.filename)}
-                                                                        className="text-red-500 hover:text-red-700 text-sm"
+                                                                        <option value="daily">每天</option>
+                                                                        <option value="0">每周日</option>
+                                                                        <option value="1">每周一</option>
+                                                                        <option value="2">每周二</option>
+                                                                        <option value="3">每周三</option>
+                                                                        <option value="4">每周四</option>
+                                                                        <option value="5">每周五</option>
+                                                                        <option value="6">每周六</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs font-medium text-gray-600 mb-1">执行时间</label>
+                                                                    <input
+                                                                        type="time"
+                                                                        value={backupSettings.scheduleTime}
+                                                                        onChange={(e) => setBackupSettings(prev => ({...prev, scheduleTime: e.target.value}))}
+                                                                        className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                            <div className="grid grid-cols-2 gap-3">
+                                                                <div>
+                                                                    <label className="block text-xs font-medium text-gray-600 mb-1">备份路径</label>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={backupSettings.path}
+                                                                        onChange={(e) => setBackupSettings(prev => ({...prev, path: e.target.value}))}
+                                                                        className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs font-medium text-gray-600 mb-1">保留数量</label>
+                                                                    <select
+                                                                        value={backupSettings.maxCount}
+                                                                        onChange={(e) => setBackupSettings(prev => ({...prev, maxCount: parseInt(e.target.value)}))}
+                                                                        className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none bg-white"
                                                                     >
-                                                                        🗑️ 删除
-                                                                    </button>
-                                                                </td>
+                                                                        <option value="5">5 个</option>
+                                                                        <option value="10">10 个</option>
+                                                                        <option value="20">20 个</option>
+                                                                        <option value="50">50 个</option>
+                                                                    </select>
+                                                                </div>
+                                                            </div>
+                                                        </>
+                                                    )}
+
+                                                    <button
+                                                        onClick={() => { handleUpdateBackupSettings({...backupSettings, mode: 'schedule'}); setBackupEditing(false); }}
+                                                        className={`w-full py-2 rounded-lg font-medium text-sm ${backupSettings.enabled ? 'bg-green-600 text-white hover:bg-green-700' : 'bg-gray-600 text-white hover:bg-gray-700'}`}
+                                                    >
+                                                        💾 保存设置
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* 备份文件列表 */}
+                                        <div>
+                                            <h4 className="text-sm font-medium text-gray-700 mb-3">📁 备份文件 ({backupFiles.length})</h4>
+                                            {backupFiles.length > 0 ? (
+                                                <div className="overflow-x-auto">
+                                                    <table className="w-full">
+                                                        <thead>
+                                                            <tr className="border-b border-gray-200">
+                                                                <th className="text-left p-2 text-xs font-medium text-gray-500">文件名</th>
+                                                                <th className="text-left p-2 text-xs font-medium text-gray-500">大小</th>
+                                                                <th className="text-left p-2 text-xs font-medium text-gray-500">创建时间</th>
+                                                                <th className="text-right p-2 text-xs font-medium text-gray-500">操作</th>
                                                             </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        ) : (
-                                            <div className="text-center py-8 text-gray-400">
-                                                <div className="text-4xl mb-2">📭</div>
-                                                <p>暂无备份文件</p>
-                                                <p className="text-xs mt-1">点击"立即备份"创建第一个备份</p>
-                                            </div>
-                                        )}
+                                                        </thead>
+                                                        <tbody>
+                                                            {backupFiles.map(f => (
+                                                                <tr key={f.filename} className="border-b border-gray-100 hover:bg-gray-50">
+                                                                    <td className="p-2 text-gray-800 text-sm font-mono truncate max-w-[200px]">{f.filename}</td>
+                                                                    <td className="p-2 text-gray-500 text-sm">{(f.size / 1024).toFixed(1)} KB</td>
+                                                                    <td className="p-2 text-gray-500 text-sm">{new Date(f.created).toLocaleString()}</td>
+                                                                    <td className="p-2 text-right whitespace-nowrap">
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                if (!confirm(`确定要从 ${f.filename} 恢复数据吗？\n\n⚠️ 这将覆盖当前所有数据！`)) return;
+                                                                                try {
+                                                                                    const res = await fetch(`/api/backup/restore/${f.filename}`, { method: 'POST' });
+                                                                                    const result = await res.json();
+                                                                                    if (result.success) {
+                                                                                        alert(`✅ ${result.message}`);
+                                                                                        window.location.reload();
+                                                                                    } else {
+                                                                                        alert(`❌ ${result.error}`);
+                                                                                    }
+                                                                                } catch (err) {
+                                                                                    alert('❌ 恢复失败: ' + err.message);
+                                                                                }
+                                                                            }}
+                                                                            className="text-purple-600 hover:text-purple-800 mr-3 text-sm font-medium"
+                                                                        >恢复</button>
+                                                                        <a href={`/api/backup/download/${f.filename}`} className="text-blue-600 hover:text-blue-800 mr-3 text-sm">下载</a>
+                                                                        <button onClick={() => handleDeleteBackup(f.filename)} className="text-red-500 hover:text-red-700 text-sm">删除</button>
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            ) : (
+                                                <div className="text-center py-8 text-gray-400 bg-gray-50 rounded-xl">
+                                                    <div className="text-3xl mb-2">📭</div>
+                                                    <p className="text-sm">暂无备份文件</p>
+                                                    <p className="text-xs mt-1">点击"立即备份"创建第一个备份</p>
+                                                </div>
+                                            )}
+                                        </div>
 
                                         {/* 最近备份日志 */}
                                         {backupLogs.length > 0 && (
-                                            <div className="mt-6 pt-4 border-t border-gray-200">
-                                                <h4 className="text-sm font-medium text-gray-700 mb-3">📜 最近备份记录</h4>
-                                                <div className="space-y-2 max-h-40 overflow-y-auto">
-                                                    {backupLogs.slice(0, 10).map(log => (
-                                                        <div key={log.id} className={`text-xs p-2 rounded-lg flex justify-between ${log.status === 'success' ? 'bg-green-50' : 'bg-red-50'}`}>
-                                                            <span className="text-gray-600">{new Date(log.timestamp).toLocaleString()}</span>
-                                                            <span className={log.status === 'success' ? 'text-green-600' : 'text-red-600'}>
-                                                                {log.status === 'success' ? `✅ ${log.filename}` : `❌ ${log.status}`}
+                                            <div className="mt-4 pt-4 border-t border-gray-200">
+                                                <h4 className="text-sm font-medium text-gray-700 mb-2">📜 最近记录</h4>
+                                                <div className="space-y-1 max-h-32 overflow-y-auto">
+                                                    {backupLogs.slice(0, 5).map(log => (
+                                                        <div key={log.id} className={`text-xs p-2 rounded flex justify-between ${
+                                                            log.status === 'success' ? 'bg-green-50' :
+                                                            log.status === 'deleted' ? 'bg-gray-50' : 'bg-red-50'
+                                                        }`}>
+                                                            <span className="text-gray-500">
+                                                                {new Date(log.timestamp).toLocaleString()}
+                                                                {log.filename && <span className="ml-2 text-gray-400">{log.filename}</span>}
+                                                            </span>
+                                                            <span className={
+                                                                log.status === 'success' ? 'text-green-600' :
+                                                                log.status === 'deleted' ? 'text-gray-600' : 'text-red-600'
+                                                            }>
+                                                                {log.status === 'success' ? '✅ 备份成功' :
+                                                                 log.status === 'deleted' ? '🗑️ 已删除' : '❌ 失败'}
                                                             </span>
                                                         </div>
                                                     ))}
@@ -1072,7 +1338,14 @@
                                         )}
                                     </div>
                                 )}
-                            </div>
+
+                                {/* 演示模式提示 */}
+                                {isDemo && (
+                                    <div className="card rounded-2xl p-6 text-center text-gray-400">
+                                        <div className="text-4xl mb-2">🔒</div>
+                                        <p>连接到服务器后可配置备份</p>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -1086,26 +1359,78 @@
                                     <button onClick={() => { setShowModal(false); setSelectedMediaIds([]); }} className="text-white/80 hover:text-white text-xl">×</button>
                                 </div>
                                 <form onSubmit={(e) => { e.preventDefault(); handleSave(new FormData(e.target)); }} className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700 mb-1">记录日期</label>
-                                        <input type="date" name="date" required defaultValue={editingRecord?.date || new Date().toISOString().split('T')[0]} className="w-full p-3 border border-gray-200 rounded-xl outline-none" />
-                                    </div>
-                                    <div className="grid grid-cols-3 gap-3">
+                                    {/* 日期和时间 */}
+                                    <div className="grid grid-cols-2 gap-3">
                                         <div>
-                                            <label className="block text-sm font-medium text-gray-700 mb-1">身高(cm)</label>
-                                            <input type="number" step="0.1" name="height" defaultValue={editingRecord?.height} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="70.5" />
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">📅 记录日期</label>
+                                            <input type="date" name="date" required defaultValue={editingRecord?.date || new Date().toISOString().split('T')[0]} className="w-full p-3 border border-gray-200 rounded-xl outline-none" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm font-medium text-gray-700 mb-1">体重(kg)</label>
-                                            <input type="number" step="0.01" name="weight" defaultValue={editingRecord?.weight} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="8.5" />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700 mb-1">头围(cm)</label>
-                                            <input type="number" step="0.1" name="head" defaultValue={editingRecord?.head} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="43" />
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">⏰ 具体时间</label>
+                                            <input type="time" name="time" defaultValue={editingRecord?.time || new Date().toTimeString().slice(0, 5)} className="w-full p-3 border border-gray-200 rounded-xl outline-none" />
                                         </div>
                                     </div>
+
+                                    {/* 生长指标 */}
                                     <div>
-                                        <label className="block text-sm font-medium text-gray-700 mb-1">备注/里程碑</label>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">📊 生长指标</label>
+                                        <div className="grid grid-cols-3 gap-3">
+                                            <div>
+                                                <label className="block text-xs text-gray-500 mb-1">身高(cm)</label>
+                                                <input type="number" step="0.1" name="height" defaultValue={editingRecord?.height || latestGrowthData.height} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="70.5" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs text-gray-500 mb-1">体重(kg)</label>
+                                                <input type="number" step="0.01" name="weight" defaultValue={editingRecord?.weight || latestGrowthData.weight} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="8.5" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs text-gray-500 mb-1">头围(cm)</label>
+                                                <input type="number" step="0.1" name="head" defaultValue={editingRecord?.head || latestGrowthData.head} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="43" />
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* 喂养记录 */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">🍼 喂养记录</label>
+                                        <div className="grid grid-cols-1 gap-3">
+                                            <div>
+                                                <label className="block text-xs text-gray-500 mb-1">奶量(ml)</label>
+                                                <input type="number" step="1" name="milk_amount" defaultValue={editingRecord?.milk_amount} className="w-full p-3 border border-gray-200 rounded-xl outline-none" placeholder="120" />
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* 排泄记录 */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">🚽 排泄记录</label>
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="block text-xs text-gray-500 mb-1">💩 大便</label>
+                                                <select name="poop" defaultValue={editingRecord?.poop || ''} className="w-full p-3 border border-gray-200 rounded-xl outline-none bg-white">
+                                                    <option value="">未记录</option>
+                                                    <option value="正常">正常</option>
+                                                    <option value="稀便">稀便</option>
+                                                    <option value="干燥">干燥</option>
+                                                    <option value="绿色">绿色</option>
+                                                    <option value="其他">其他</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs text-gray-500 mb-1">💧 小便</label>
+                                                <select name="pee" defaultValue={editingRecord?.pee || ''} className="w-full p-3 border border-gray-200 rounded-xl outline-none bg-white">
+                                                    <option value="">未记录</option>
+                                                    <option value="正常">正常</option>
+                                                    <option value="量少">量少</option>
+                                                    <option value="量多">量多</option>
+                                                    <option value="颜色深">颜色深</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">📝 备注/里程碑</label>
                                         <textarea name="note" rows="2" defaultValue={editingRecord?.note} className="w-full p-3 border border-gray-200 rounded-xl outline-none resize-none" placeholder="例如：第一次翻身"></textarea>
                                     </div>
 
@@ -1183,28 +1508,76 @@
                         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 overflow-y-auto">
                             <div className="card rounded-2xl w-full max-w-2xl overflow-hidden my-4">
                                 <div className="bg-gradient-to-r from-purple-600 to-pink-500 text-white p-4 flex justify-between items-center">
-                                    <h3 className="font-bold">📋 记录详情 - {viewingRecord.date}</h3>
+                                    <h3 className="font-bold">📋 记录详情 - {viewingRecord.date} {viewingRecord.time && `${viewingRecord.time}`}</h3>
                                     <button onClick={() => setViewingRecord(null)} className="text-white/80 hover:text-white text-xl">×</button>
                                 </div>
                                 <div className="p-6">
-                                    {/* 数据统计 */}
-                                    <div className="grid grid-cols-3 gap-4 mb-6">
-                                        <div className="bg-purple-50 p-4 rounded-xl text-center">
-                                            <div className="text-2xl mb-1">📏</div>
-                                            <div className="text-sm text-gray-500">身高</div>
-                                            <div className="text-xl font-bold text-purple-600">{viewingRecord.height} cm</div>
+                                    {/* 生长数据 */}
+                                    {(viewingRecord.height > 0 || viewingRecord.weight > 0 || viewingRecord.head > 0) && (
+                                        <div className="mb-6">
+                                            <h4 className="text-sm font-medium text-gray-500 mb-3">📊 生长指标</h4>
+                                            <div className="grid grid-cols-3 gap-4">
+                                                {viewingRecord.height > 0 && (
+                                                    <div className="bg-purple-50 p-4 rounded-xl text-center">
+                                                        <div className="text-2xl mb-1">📏</div>
+                                                        <div className="text-sm text-gray-500">身高</div>
+                                                        <div className="text-xl font-bold text-purple-600">{viewingRecord.height} cm</div>
+                                                    </div>
+                                                )}
+                                                {viewingRecord.weight > 0 && (
+                                                    <div className="bg-green-50 p-4 rounded-xl text-center">
+                                                        <div className="text-2xl mb-1">⚖️</div>
+                                                        <div className="text-sm text-gray-500">体重</div>
+                                                        <div className="text-xl font-bold text-green-600">{viewingRecord.weight} kg</div>
+                                                    </div>
+                                                )}
+                                                {viewingRecord.head > 0 && (
+                                                    <div className="bg-blue-50 p-4 rounded-xl text-center">
+                                                        <div className="text-2xl mb-1">🧒</div>
+                                                        <div className="text-sm text-gray-500">头围</div>
+                                                        <div className="text-xl font-bold text-blue-600">{viewingRecord.head} cm</div>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
-                                        <div className="bg-green-50 p-4 rounded-xl text-center">
-                                            <div className="text-2xl mb-1">⚖️</div>
-                                            <div className="text-sm text-gray-500">体重</div>
-                                            <div className="text-xl font-bold text-green-600">{viewingRecord.weight} kg</div>
+                                    )}
+
+                                    {/* 喂养记录 */}
+                                    {viewingRecord.milk_amount > 0 && (
+                                        <div className="mb-6">
+                                            <h4 className="text-sm font-medium text-gray-500 mb-3">🍼 喂养记录</h4>
+                                            <div className="grid grid-cols-3 gap-4">
+                                                <div className="bg-pink-50 p-4 rounded-xl text-center">
+                                                    <div className="text-2xl mb-1">🍼</div>
+                                                    <div className="text-sm text-gray-500">奶量</div>
+                                                    <div className="text-xl font-bold text-pink-600">{viewingRecord.milk_amount} ml</div>
+                                                </div>
+                                            </div>
                                         </div>
-                                        <div className="bg-blue-50 p-4 rounded-xl text-center">
-                                            <div className="text-2xl mb-1">🧒</div>
-                                            <div className="text-sm text-gray-500">头围</div>
-                                            <div className="text-xl font-bold text-blue-600">{viewingRecord.head} cm</div>
+                                    )}
+
+                                    {/* 排泄记录 */}
+                                    {(viewingRecord.poop || viewingRecord.pee) && (
+                                        <div className="mb-6">
+                                            <h4 className="text-sm font-medium text-gray-500 mb-3">🚽 排泄记录</h4>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                {viewingRecord.poop && (
+                                                    <div className="bg-amber-50 p-4 rounded-xl text-center">
+                                                        <div className="text-2xl mb-1">💩</div>
+                                                        <div className="text-sm text-gray-500">大便</div>
+                                                        <div className="text-xl font-bold text-amber-600">{viewingRecord.poop}</div>
+                                                    </div>
+                                                )}
+                                                {viewingRecord.pee && (
+                                                    <div className="bg-cyan-50 p-4 rounded-xl text-center">
+                                                        <div className="text-2xl mb-1">💧</div>
+                                                        <div className="text-sm text-gray-500">小便</div>
+                                                        <div className="text-xl font-bold text-cyan-600">{viewingRecord.pee}</div>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
-                                    </div>
+                                    )}
 
                                     {/* 备注 */}
                                     {viewingRecord.note && (

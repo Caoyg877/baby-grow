@@ -2,7 +2,7 @@
 
 一个简洁、轻量的宝宝成长数据记录与可视化应用，支持记录身高、体重、头围等生长指标，并可关联照片/视频，形成完整的成长档案。
 
-![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen.svg)
 
@@ -12,7 +12,15 @@
 - 首次部署自动引导设置管理员账户
 - 密码使用 SHA256 + 随机 salt 加密存储
 - HttpOnly Cookie 会话管理，有效期 7 天
+- 支持「记住我」功能，延长会话至 30 天
 - 无需配置文件传递密码，更安全
+
+### 🔑 API Token 管理
+- 为第三方应用创建访问令牌
+- 支持 `read`（只读）和 `write`（读写）权限
+- 支持设置过期时间（7天/30天/90天/永久）
+- 三种认证方式：Bearer Token、X-API-Key、Query Parameter
+- Token 创建后仅显示一次，安全性高
 
 ### 📊 数据看板
 - 实时显示最新身高、体重、头围、记录次数
@@ -44,7 +52,9 @@
 
 ### ⚙️ 系统设置
 - 宝宝档案设置（昵称、出生日期、性别、血型）
+- 宝宝头像设置（支持上传、裁剪、从相册选择）
 - 备份策略配置
+- API Token 管理
 - 退出登录
 
 ---
@@ -230,6 +240,35 @@ npm start
 | GET | `/api/backup/download/:filename` | 下载备份文件 |
 | DELETE | `/api/backup/files/:filename` | 删除备份文件 |
 | GET | `/api/backup/logs` | 获取备份日志 |
+
+### API Token 接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/tokens` | 获取 Token 列表（仅 Web 管理员） |
+| POST | `/api/tokens` | 创建新 Token |
+| PUT | `/api/tokens/:id` | 更新 Token 状态 |
+| DELETE | `/api/tokens/:id` | 删除 Token |
+
+### 宝宝头像接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/baby/avatar` | 上传头像（base64） |
+| DELETE | `/api/baby/avatar` | 删除头像 |
+
+### 使用 API Token 访问
+
+```bash
+# 方式1: Authorization Header (推荐)
+curl -H "Authorization: Bearer baby_xxx..." http://localhost:3000/api/records
+
+# 方式2: X-API-Key Header
+curl -H "X-API-Key: baby_xxx..." http://localhost:3000/api/records
+
+# 方式3: Query Parameter (仅用于测试)
+curl "http://localhost:3000/api/records?api_key=baby_xxx..."
+```
 
 ---
 

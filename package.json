@@ -1,6 +1,6 @@
 {
   "name": "baby-tracker",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "宝宝成长记录服务 - 轻量级私有化部署",
   "main": "server.js",
   "scripts": {

@@ -17,6 +17,7 @@ const BACKUP_PATH = process.env.BACKUP_PATH || './backups';
 const THUMB_PATH = process.env.THUMB_PATH || './data/thumbnails';
 
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7天
+const SESSION_REMEMBER_AGE = 30 * 24 * 60 * 60 * 1000; // 30天（记住密码）
 
 // 简单的会话存储（内存中）
 const sessions = new Map();
@@ -51,6 +52,66 @@ function validateSession(sessionId) {
         return false;
     }
     return true;
+}
+
+// 生成 API Token
+function generateApiToken() {
+    return 'baby_' + crypto.randomBytes(32).toString('hex');
+}
+
+// 验证 API Token（延迟初始化，等数据库准备好）
+function validateApiToken(token, requiredPermission = 'read') {
+    if (!token) return { valid: false };
+
+    try {
+        const tokenData = db.prepare(
+            'SELECT * FROM api_tokens WHERE token = ? AND is_active = 1'
+        ).get(token);
+
+        if (!tokenData) return { valid: false };
+
+        // 检查是否过期
+        if (tokenData.expires_at) {
+            const expiresAt = new Date(tokenData.expires_at);
+            if (expiresAt <= new Date()) {
+                return { valid: false, reason: 'expired' };
+            }
+        }
+
+        // 检查权限：write 权限包含 read
+        if (requiredPermission === 'write' && tokenData.permission === 'read') {
+            return { valid: false, reason: 'insufficient_permission' };
+        }
+
+        // 更新最后使用时间
+        db.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?')
+            .run(new Date().toISOString(), tokenData.id);
+
+        return { valid: true, token: tokenData };
+    } catch (e) {
+        return { valid: false };
+    }
+}
+
+// 从请求中提取 API Token
+function extractApiToken(req) {
+    // 方式1: Authorization: Bearer <token>
+    const authHeader = req.headers.authorization || '';
+    if (authHeader.startsWith('Bearer ')) {
+        return authHeader.substring(7);
+    }
+
+    // 方式2: X-API-Key header
+    if (req.headers['x-api-key']) {
+        return req.headers['x-api-key'];
+    }
+
+    // 方式3: Query parameter (不推荐，但方便测试)
+    if (req.query.api_key) {
+        return req.query.api_key;
+    }
+
+    return null;
 }
 
 // 确保缩略图目录存在
@@ -102,18 +163,43 @@ const authMiddleware = (req, res, next) => {
         return res.send(getSetupPage());
     }
 
-    // 检查 Cookie 中的会话
+    // 方式1: 检查 API Token（优先）
+    const apiToken = extractApiToken(req);
+    if (apiToken) {
+        // 判断所需权限：写操作需要 write 权限
+        const writeOperations = ['POST', 'PUT', 'DELETE'];
+        const requiredPermission = writeOperations.includes(req.method) ? 'write' : 'read';
+
+        const tokenResult = validateApiToken(apiToken, requiredPermission);
+        if (tokenResult.valid) {
+            req.authType = 'api_token';
+            req.tokenData = tokenResult.token;
+            return next();
+        }
+
+        // Token 无效或权限不足
+        if (tokenResult.reason === 'insufficient_permission') {
+            return res.status(403).json({ error: 'API Token 权限不足，需要 write 权限' });
+        }
+        if (tokenResult.reason === 'expired') {
+            return res.status(401).json({ error: 'API Token 已过期' });
+        }
+        return res.status(401).json({ error: 'API Token 无效或已禁用' });
+    }
+
+    // 方式2: 检查 Cookie 中的会话
     const cookies = req.headers.cookie || '';
     const sessionMatch = cookies.match(/baby_session=([^;]+)/);
     const sessionId = sessionMatch ? sessionMatch[1] : null;
 
     if (validateSession(sessionId)) {
+        req.authType = 'session';
         return next();
     }
 
     // 未认证：API 返回 401，页面返回登录页
     if (req.path.startsWith('/api/')) {
-        return res.status(401).json({ error: '未授权，请先登录' });
+        return res.status(401).json({ error: '未授权，请先登录或提供有效的 API Token' });
     }
 
     // 返回登录页面
@@ -249,18 +335,23 @@ function getLoginPage(error = '') {
             <p class="text-gray-500 text-sm md:text-base mt-1 md:mt-2">请登录以访问</p>
         </div>
         ${error ? `<div class="bg-red-50 text-red-600 p-3 rounded-xl mb-4 text-center text-sm">${error}</div>` : ''}
-        <form method="POST" action="/api/auth/login" class="space-y-4">
+        <form method="POST" action="/api/auth/login" class="space-y-4" id="loginForm">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1.5">用户名</label>
-                <input type="text" name="username" required autofocus autocomplete="username"
+                <input type="text" name="username" id="username" required autocomplete="username"
                     class="w-full p-3 md:p-3.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none text-base transition-all"
                     placeholder="请输入用户名">
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1.5">密码</label>
-                <input type="password" name="password" required autocomplete="current-password"
+                <input type="password" name="password" id="password" required autocomplete="current-password"
                     class="w-full p-3 md:p-3.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none text-base transition-all"
                     placeholder="请输入密码">
+            </div>
+            <div class="flex items-center">
+                <input type="checkbox" name="remember" id="remember" value="1"
+                    class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500 cursor-pointer">
+                <label for="remember" class="ml-2 text-sm text-gray-600 cursor-pointer select-none">记住我（30天内免登录）</label>
             </div>
             <button type="submit"
                 class="w-full bg-purple-600 text-white py-3.5 md:py-3 rounded-xl font-medium hover:bg-purple-700 active:bg-purple-800 transition-all text-base shadow-lg shadow-purple-200">
@@ -271,6 +362,36 @@ function getLoginPage(error = '') {
             密码已加密存储，请妥善保管账户信息
         </p>
     </div>
+    <script>
+        // 页面加载时恢复保存的用户名
+        document.addEventListener('DOMContentLoaded', function() {
+            const savedUsername = localStorage.getItem('baby_remember_username');
+            const usernameInput = document.getElementById('username');
+            const passwordInput = document.getElementById('password');
+            const rememberCheckbox = document.getElementById('remember');
+
+            if (savedUsername) {
+                usernameInput.value = savedUsername;
+                rememberCheckbox.checked = true;
+                // 用户名已填充，聚焦到密码框
+                passwordInput.focus();
+            } else {
+                usernameInput.focus();
+            }
+        });
+
+        // 表单提交时保存或清除用户名
+        document.getElementById('loginForm').addEventListener('submit', function() {
+            const username = document.getElementById('username').value;
+            const remember = document.getElementById('remember').checked;
+
+            if (remember && username) {
+                localStorage.setItem('baby_remember_username', username);
+            } else {
+                localStorage.removeItem('baby_remember_username');
+            }
+        });
+    </script>
 </body>
 </html>`;
 }
@@ -327,7 +448,7 @@ app.post('/api/auth/register', (req, res) => {
 
 // 登录 API
 app.post('/api/auth/login', (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, remember } = req.body;
 
     // 从数据库获取管理员信息
     const admin = db.prepare('SELECT * FROM admin_user WHERE id = 1').get();
@@ -339,12 +460,14 @@ app.post('/api/auth/login', (req, res) => {
     // 验证密码
     if (username === admin.username && verifyPassword(password, admin.password_hash, admin.password_salt)) {
         const sessionId = generateSessionId();
+        const maxAge = remember ? SESSION_REMEMBER_AGE : SESSION_MAX_AGE;
+
         sessions.set(sessionId, {
             user: username,
-            expires: Date.now() + SESSION_MAX_AGE
+            expires: Date.now() + maxAge
         });
 
-        res.setHeader('Set-Cookie', `baby_session=${sessionId}; Path=/; HttpOnly; Max-Age=${SESSION_MAX_AGE / 1000}; SameSite=Lax`);
+        res.setHeader('Set-Cookie', `baby_session=${sessionId}; Path=/; HttpOnly; Max-Age=${maxAge / 1000}; SameSite=Lax`);
         return res.redirect('/');
     }
 
@@ -446,6 +569,17 @@ db.exec(`
     mediaCount INTEGER,
     status TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    token TEXT UNIQUE NOT NULL,
+    permission TEXT DEFAULT 'read',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT,
+    last_used_at TEXT,
+    is_active INTEGER DEFAULT 1
+  );
 `);
 
 // 数据库迁移
@@ -463,6 +597,10 @@ try {
 } catch (e) {}
 try {
     db.exec(`ALTER TABLE records ADD COLUMN pee TEXT DEFAULT ''`);
+} catch (e) {}
+// 迁移：为 api_tokens 添加 expires_at 字段
+try {
+    db.exec(`ALTER TABLE api_tokens ADD COLUMN expires_at TEXT`);
 } catch (e) {}
 
 // --- Helper Functions ---
@@ -591,6 +729,34 @@ app.post('/api/baby', (req, res) => {
     res.json({ success: true });
 });
 
+// 上传宝宝头像 (base64)
+app.post('/api/baby/avatar', (req, res) => {
+    const { avatar } = req.body;
+
+    if (!avatar) {
+        return res.status(400).json({ error: '头像数据不能为空' });
+    }
+
+    // 验证 base64 图片格式
+    if (!avatar.startsWith('data:image/')) {
+        return res.status(400).json({ error: '无效的图片格式' });
+    }
+
+    // 限制图片大小 (约 2MB base64)
+    if (avatar.length > 2 * 1024 * 1024 * 1.37) {
+        return res.status(400).json({ error: '图片大小不能超过 2MB' });
+    }
+
+    db.prepare('UPDATE baby SET avatar = ? WHERE id = 1').run(avatar);
+    res.json({ success: true });
+});
+
+// 删除宝宝头像
+app.delete('/api/baby/avatar', (req, res) => {
+    db.prepare('UPDATE baby SET avatar = NULL WHERE id = 1').run();
+    res.json({ success: true });
+});
+
 // 2. Growth Records
 app.get('/api/records', (req, res) => {
     const records = db.prepare('SELECT * FROM records ORDER BY date DESC').all();
@@ -613,6 +779,132 @@ app.put('/api/records/:id', (req, res) => {
 
 app.delete('/api/records/:id', (req, res) => {
     db.prepare('DELETE FROM records WHERE id = ?').run(req.params.id);
+    res.json({ success: true });
+});
+
+// =============================================
+// 2.5 API Token 管理
+// =============================================
+
+// 获取所有 Token 列表（不返回完整 token，只返回前缀）
+app.get('/api/tokens', (req, res) => {
+    // 只有 Session 认证（Web 管理员）才能管理 Token
+    if (req.authType !== 'session') {
+        return res.status(403).json({ error: 'Token 管理仅限 Web 管理员' });
+    }
+
+    const tokens = db.prepare(
+        'SELECT id, name, permission, created_at, expires_at, last_used_at, is_active FROM api_tokens ORDER BY created_at DESC'
+    ).all();
+
+    // 返回时隐藏完整 token
+    res.json(tokens.map(t => ({
+        ...t,
+        token_preview: 'baby_****' + t.id  // 不显示完整 token
+    })));
+});
+
+// 创建新 Token
+app.post('/api/tokens', (req, res) => {
+    if (req.authType !== 'session') {
+        return res.status(403).json({ error: 'Token 管理仅限 Web 管理员' });
+    }
+
+    const { name, permission = 'read', expires_in = 0 } = req.body;
+
+    if (!name || name.trim().length === 0) {
+        return res.status(400).json({ error: 'Token 名称不能为空' });
+    }
+
+    if (!['read', 'write'].includes(permission)) {
+        return res.status(400).json({ error: '权限类型无效，只能是 read 或 write' });
+    }
+
+    const token = generateApiToken();
+
+    // 计算过期时间
+    let expiresAt = null;
+    if (expires_in > 0) {
+        const expireDate = new Date();
+        expireDate.setDate(expireDate.getDate() + expires_in);
+        expiresAt = expireDate.toISOString();
+    }
+
+    try {
+        const info = db.prepare(
+            'INSERT INTO api_tokens (name, token, permission, expires_at) VALUES (?, ?, ?, ?)'
+        ).run(name.trim(), token, permission, expiresAt);
+
+        const expiresDesc = expires_in > 0 ? `${expires_in}天后过期` : '永久有效';
+        console.log(`[API Token] 已创建: ${name} (${permission}, ${expiresDesc})`);
+
+        // 只在创建时返回完整 token，之后无法再获取
+        res.json({
+            success: true,
+            id: info.lastInsertRowid,
+            name: name.trim(),
+            token: token,  // 仅此一次显示完整 token
+            permission,
+            expires_at: expiresAt,
+            message: '⚠️ 请立即保存此 Token，关闭后将无法再次查看完整内容'
+        });
+    } catch (error) {
+        console.error('[API Token] 创建失败:', error.message);
+        res.status(500).json({ error: '创建 Token 失败: ' + error.message });
+    }
+});
+
+// 更新 Token 状态（启用/禁用）
+app.put('/api/tokens/:id', (req, res) => {
+    if (req.authType !== 'session') {
+        return res.status(403).json({ error: 'Token 管理仅限 Web 管理员' });
+    }
+
+    const { is_active, name, permission } = req.body;
+    const tokenId = req.params.id;
+
+    // 检查 token 是否存在
+    const existing = db.prepare('SELECT * FROM api_tokens WHERE id = ?').get(tokenId);
+    if (!existing) {
+        return res.status(404).json({ error: 'Token 不存在' });
+    }
+
+    // 更新字段
+    if (typeof is_active === 'number' || typeof is_active === 'boolean') {
+        db.prepare('UPDATE api_tokens SET is_active = ? WHERE id = ?')
+            .run(is_active ? 1 : 0, tokenId);
+    }
+
+    if (name && name.trim().length > 0) {
+        db.prepare('UPDATE api_tokens SET name = ? WHERE id = ?')
+            .run(name.trim(), tokenId);
+    }
+
+    if (permission && ['read', 'write'].includes(permission)) {
+        db.prepare('UPDATE api_tokens SET permission = ? WHERE id = ?')
+            .run(permission, tokenId);
+    }
+
+    console.log(`[API Token] 已更新: ID=${tokenId}`);
+    res.json({ success: true });
+});
+
+// 删除 Token
+app.delete('/api/tokens/:id', (req, res) => {
+    if (req.authType !== 'session') {
+        return res.status(403).json({ error: 'Token 管理仅限 Web 管理员' });
+    }
+
+    const tokenId = req.params.id;
+    const existing = db.prepare('SELECT name FROM api_tokens WHERE id = ?').get(tokenId);
+
+    if (!existing) {
+        return res.status(404).json({ error: 'Token 不存在' });
+    }
+
+    db.prepare('DELETE FROM api_tokens WHERE id = ?').run(tokenId);
+    console.log(`[API Token] 已删除: ${existing.name}`);
+
     res.json({ success: true });
 });
 

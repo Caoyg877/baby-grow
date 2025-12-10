@@ -7,8 +7,8 @@ services:
       - "3000:3000"
     volumes:
       - baby_data:/app/data
-      - /media/Photos:/app/media
-      - /data/backups:/app/backups
+      - /vol1/1000/Photos:/app/media
+      - /vol1/1000/cyg/data/baby_backups:/app/backups
     environment:
       - PORT=3000
       - DB_PATH=/app/data/baby.db

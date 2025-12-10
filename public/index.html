@@ -18,18 +18,9 @@
         .card { background: rgba(255,255,255,0.95); backdrop-filter: blur(10px); }
         .stat-card { transition: transform 0.2s; }
         .stat-card:hover { transform: translateY(-2px); }
-        /* 移动端底部导航 */
+        /* 移动端底部导航安全区域适配 */
         .mobile-nav {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            z-index: 40;
             padding-bottom: env(safe-area-inset-bottom);
-        }
-        /* 移动端内容区域留出底部空间 */
-        @media (max-width: 768px) {
-            .main-content { padding-bottom: 100px; }
         }
         /* 图片懒加载占位 */
         .img-placeholder {
@@ -61,6 +52,7 @@
             const [selectedMediaIds, setSelectedMediaIds] = useState([]);
             const [viewingRecord, setViewingRecord] = useState(null);
             const [lightboxImage, setLightboxImage] = useState(null);
+            const [lightboxMediaList, setLightboxMediaList] = useState(null); // 灯箱图片列表上下文（null=使用全部图库）
             const [loading, setLoading] = useState(true);
             const [isDemo, setIsDemo] = useState(false);
             const [authEnabled, setAuthEnabled] = useState(false);
@@ -78,12 +70,30 @@
             const [backupLoading, setBackupLoading] = useState(false);
             const [backupEditing, setBackupEditing] = useState(false);
 
+            // API Token 管理状态
+            const [apiTokens, setApiTokens] = useState([]);
+            const [showTokenModal, setShowTokenModal] = useState(false);
+            const [newToken, setNewToken] = useState(null); // 新创建的 token（只显示一次）
+            const [tokenForm, setTokenForm] = useState({ name: '', permission: 'read', expires_in: 0 });
+
             // 图片分页状态
             const [galleryPage, setGalleryPage] = useState(1);
             const ITEMS_PER_PAGE = 50; // 每页显示数量
 
             // 日记统计日期选择（默认今天）
             const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+
+            // 宝宝档案编辑状态
+            const [editingBabyProfile, setEditingBabyProfile] = useState(false);
+
+            // 设置页子标签
+            const [settingsTab, setSettingsTab] = useState('profile');
+
+            // 头像选择器状态
+            const [showAvatarModal, setShowAvatarModal] = useState(false);
+            const [avatarCropImage, setAvatarCropImage] = useState(null); // 待裁剪的图片
+            const [cropPosition, setCropPosition] = useState({ x: 0, y: 0, scale: 1 });
+            const avatarCanvasRef = useRef(null);
 
             // 演示数据
             const DEMO_RECORDS = [
@@ -373,6 +383,7 @@
                 const handleKeyDown = (e) => {
                     if (e.key === 'Escape' && lightboxImage) {
                         setLightboxImage(null);
+                        setLightboxMediaList(null);
                     }
                 };
                 window.addEventListener('keydown', handleKeyDown);
@@ -408,7 +419,93 @@
                     });
                     initData();
                 }
+                setEditingBabyProfile(false);
                 alert('保存成功！');
+            };
+
+            // 头像处理函数
+            const handleAvatarSelect = (imageUrl) => {
+                // 加载图片进行裁剪
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => {
+                    setAvatarCropImage({ src: imageUrl, width: img.width, height: img.height });
+                    setCropPosition({ x: 0, y: 0, scale: 1 });
+                };
+                img.onerror = () => alert('图片加载失败');
+                img.src = imageUrl;
+            };
+
+            const handleAvatarFileSelect = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                if (file.size > 5 * 1024 * 1024) {
+                    alert('图片大小不能超过 5MB');
+                    return;
+                }
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    handleAvatarSelect(event.target.result);
+                };
+                reader.readAsDataURL(file);
+                e.target.value = '';
+            };
+
+            const handleAvatarCrop = async () => {
+                if (!avatarCropImage) return;
+
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                const outputSize = 200; // 输出头像尺寸
+                canvas.width = outputSize;
+                canvas.height = outputSize;
+
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = async () => {
+                    const { x, y, scale } = cropPosition;
+                    const minDim = Math.min(img.width, img.height);
+                    const cropSize = minDim / scale;
+                    const centerX = img.width / 2;
+                    const centerY = img.height / 2;
+                    const sx = centerX - cropSize / 2 - (x * cropSize / outputSize);
+                    const sy = centerY - cropSize / 2 - (y * cropSize / outputSize);
+
+                    ctx.drawImage(img, sx, sy, cropSize, cropSize, 0, 0, outputSize, outputSize);
+
+                    const avatarData = canvas.toDataURL('image/jpeg', 0.85);
+
+                    try {
+                        const res = await fetch('/api/baby/avatar', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ avatar: avatarData })
+                        });
+                        if (res.ok) {
+                            setBaby({ ...baby, avatar: avatarData });
+                            setShowAvatarModal(false);
+                            setAvatarCropImage(null);
+                        } else {
+                            const err = await res.json();
+                            alert(err.error || '上传失败');
+                        }
+                    } catch (err) {
+                        alert('上传失败: ' + err.message);
+                    }
+                };
+                img.src = avatarCropImage.src;
+            };
+
+            const handleAvatarDelete = async () => {
+                if (!confirm('确定要删除头像吗？')) return;
+                try {
+                    const res = await fetch('/api/baby/avatar', { method: 'DELETE' });
+                    if (res.ok) {
+                        setBaby({ ...baby, avatar: null });
+                    }
+                } catch (err) {
+                    alert('删除失败');
+                }
             };
 
             // 加载备份设置
@@ -425,6 +522,112 @@
                 } catch (e) {
                     console.error('加载备份设置失败:', e);
                 }
+            };
+
+            // =============================================
+            // API Token 管理函数
+            // =============================================
+
+            // 加载 Token 列表
+            const loadApiTokens = async () => {
+                try {
+                    const res = await fetch('/api/tokens');
+                    if (res.ok) {
+                        const tokens = await res.json();
+                        setApiTokens(tokens);
+                    }
+                } catch (e) {
+                    console.error('加载 Token 列表失败:', e);
+                }
+            };
+
+            // 创建新 Token
+            const handleCreateToken = async () => {
+                if (!tokenForm.name.trim()) {
+                    alert('请输入 Token 名称');
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/tokens', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(tokenForm)
+                    });
+                    const result = await res.json();
+                    if (result.success) {
+                        setNewToken(result); // 保存新 token 用于显示
+                        setTokenForm({ name: '', permission: 'read', expires_in: 0 });
+                        loadApiTokens();
+                    } else {
+                        alert('❌ ' + (result.error || '创建失败'));
+                    }
+                } catch (e) {
+                    alert('❌ 创建失败: ' + e.message);
+                }
+            };
+
+            // 切换 Token 状态
+            const handleToggleToken = async (id, currentStatus) => {
+                try {
+                    await fetch(`/api/tokens/${id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ is_active: currentStatus ? 0 : 1 })
+                    });
+                    loadApiTokens();
+                } catch (e) {
+                    alert('❌ 操作失败: ' + e.message);
+                }
+            };
+
+            // 删除 Token
+            const handleDeleteToken = async (id, name) => {
+                if (!confirm(`确定删除 Token "${name}" 吗？删除后使用该 Token 的应用将无法访问。`)) return;
+                try {
+                    await fetch(`/api/tokens/${id}`, { method: 'DELETE' });
+                    loadApiTokens();
+                } catch (e) {
+                    alert('❌ 删除失败: ' + e.message);
+                }
+            };
+
+            // 复制到剪贴板
+            const copyToClipboard = async (text) => {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    alert('✅ 已复制到剪贴板');
+                } catch (e) {
+                    // 降级方案
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(textarea);
+                    alert('✅ 已复制到剪贴板');
+                }
+            };
+
+            // 计算 Token 过期状态
+            const getTokenExpiryStatus = (expiresAt) => {
+                if (!expiresAt) return { status: 'permanent', text: '永久有效', color: 'green' };
+
+                const now = new Date();
+                const expiry = new Date(expiresAt);
+                const diffMs = expiry - now;
+
+                if (diffMs <= 0) {
+                    return { status: 'expired', text: '已过期', color: 'red' };
+                }
+
+                const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+                const diffHours = Math.ceil(diffMs / (1000 * 60 * 60));
+
+                if (diffDays <= 3) {
+                    return { status: 'expiring', text: `${diffHours < 24 ? diffHours + '小时' : diffDays + '天'}后过期`, color: 'orange' };
+                }
+
+                return { status: 'valid', text: `${diffDays}天后过期`, color: 'blue' };
             };
 
             // 更新备份设置
@@ -478,10 +681,11 @@
                 }
             };
 
-            // 当切换到设置页时加载备份设置
+            // 当切换到设置页时加载备份设置和 Token 列表
             useEffect(() => {
                 if (view === 'settings' && !isDemo) {
                     loadBackupSettings();
+                    loadApiTokens();
                 }
             }, [view, isDemo]);
 
@@ -499,8 +703,12 @@
                     <div className="max-w-6xl mx-auto mb-6">
                         <div className="card rounded-2xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                             <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 md:w-12 md:h-12 bg-gradient-to-br from-pink-400 to-purple-500 rounded-full flex items-center justify-center text-white text-xl md:text-2xl">
-                                    👶
+                                <div className="w-10 h-10 md:w-12 md:h-12 bg-gradient-to-br from-pink-400 to-purple-500 rounded-full flex items-center justify-center text-white text-xl md:text-2xl overflow-hidden shadow-md">
+                                    {baby.avatar ? (
+                                        <img src={baby.avatar} alt="头像" className="w-full h-full object-cover" />
+                                    ) : (
+                                        '👶'
+                                    )}
                                 </div>
                                 <div>
                                     <h1 className="text-lg md:text-xl font-bold text-gray-800">{baby.name}的成长记录</h1>
@@ -539,10 +747,10 @@
                         )}
                     </div>
 
-                    {/* 移动端底部导航栏 */}
-                    <div className="md:hidden mobile-nav">
-                        <div className="bg-white border-t border-gray-200 shadow-lg">
-                            <div className="flex justify-around py-2">
+                    {/* 移动端底部固定导航栏 */}
+                    <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 mobile-nav" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+                        <div className="bg-white/95 backdrop-blur-lg border-t border-gray-200 shadow-[0_-4px_20px_rgba(0,0,0,0.1)]">
+                            <div className="flex justify-around items-center py-2 px-1">
                                 {[
                                     { id: 'dashboard', icon: '📊', label: '看板' },
                                     { id: 'records', icon: '📋', label: '记录' },
@@ -552,25 +760,34 @@
                                     <button
                                         key={item.id}
                                         onClick={() => { setView(item.id); setGalleryPage(1); }}
-                                        className={`flex flex-col items-center px-4 py-2 rounded-lg transition-all ${
+                                        className={`flex flex-col items-center justify-center min-w-[60px] py-1.5 px-2 rounded-xl transition-all ${
                                             view === item.id
-                                            ? 'text-purple-600'
-                                            : 'text-gray-500'
+                                            ? 'text-purple-600 bg-purple-50'
+                                            : 'text-gray-400 active:bg-gray-100'
                                         }`}
                                     >
-                                        <span className="text-xl mb-1">{item.icon}</span>
-                                        <span className="text-xs font-medium">{item.label}</span>
+                                        <span className={`text-2xl mb-0.5 transition-transform ${view === item.id ? 'scale-110' : ''}`}>{item.icon}</span>
+                                        <span className={`text-xs font-medium ${view === item.id ? 'text-purple-600' : 'text-gray-500'}`}>{item.label}</span>
                                         {view === item.id && (
-                                            <div className="w-1 h-1 bg-purple-600 rounded-full mt-1"></div>
+                                            <div className="w-1 h-1 bg-purple-500 rounded-full mt-0.5"></div>
                                         )}
                                     </button>
                                 ))}
+                                {authEnabled && (
+                                    <button
+                                        onClick={handleLogout}
+                                        className="flex flex-col items-center justify-center min-w-[60px] py-1.5 px-2 rounded-xl text-gray-400 active:bg-red-50 active:text-red-500 transition-all"
+                                    >
+                                        <span className="text-2xl mb-0.5">🚪</span>
+                                        <span className="text-xs font-medium text-gray-500">退出</span>
+                                    </button>
+                                )}
                             </div>
                         </div>
                     </div>
 
-                    {/* 主内容区 */}
-                    <div className="max-w-6xl mx-auto">
+                    {/* 主内容区 - 移动端底部留出导航栏空间 */}
+                    <div className="max-w-6xl mx-auto pb-20 md:pb-0">
                         {/* 看板视图 */}
                         {view === 'dashboard' && (
                             <div className="space-y-4 md:space-y-6">
@@ -887,7 +1104,7 @@
                                                                         <div
                                                                             key={m.id}
                                                                             className="flex-shrink-0 w-12 h-12 md:w-14 md:h-14 rounded-lg overflow-hidden bg-gray-200"
-                                                                            onClick={(e) => { e.stopPropagation(); setLightboxImage(m); }}
+                                                                            onClick={(e) => { e.stopPropagation(); setLightboxImage(m); setLightboxMediaList(recordMedia); }}
                                                                         >
                                                                             <img src={m.thumb || m.url} alt="" className="w-full h-full object-cover" />
                                                                         </div>
@@ -973,7 +1190,7 @@
                                                         <div
                                                             key={m.id}
                                                             className="aspect-square md:w-20 md:h-20 bg-gray-100 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-purple-400 transition-all group relative"
-                                                            onClick={() => setLightboxImage(m)}
+                                                            onClick={() => { setLightboxImage(m); setLightboxMediaList(null); }}
                                                             title={m.title || '点击查看大图'}
                                                         >
                                                             {m.type === 'video' ? (
@@ -1029,46 +1246,225 @@
 
                         {/* 设置视图 */}
                         {view === 'settings' && (
-                            <div className="space-y-6">
-                                {/* 宝宝档案设置 */}
-                                <div className="card rounded-2xl p-4 md:p-6">
-                                    <h3 className="text-base md:text-lg font-bold text-gray-800 mb-4">👶 宝宝档案</h3>
-                                    <form onSubmit={(e) => { e.preventDefault(); handleUpdateBaby(new FormData(e.target)); }}>
-                                        <div className="grid md:grid-cols-2 gap-4">
-                                            <div className="grid grid-cols-2 gap-3">
-                                                <div>
-                                                    <label className="block text-xs font-medium text-gray-600 mb-1">昵称</label>
-                                                    <input name="name" defaultValue={baby.name} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none" />
-                                                </div>
-                                                <div>
-                                                    <label className="block text-xs font-medium text-gray-600 mb-1">出生日期</label>
-                                                    <input type="date" name="birthDate" defaultValue={baby.birthDate} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none" />
-                                                </div>
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-3">
-                                                <div>
-                                                    <label className="block text-xs font-medium text-gray-600 mb-1">性别</label>
-                                                    <select name="gender" defaultValue={baby.gender} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none">
-                                                        <option value="male">男宝宝</option>
-                                                        <option value="female">女宝宝</option>
-                                                    </select>
-                                                </div>
-                                                <div>
-                                                    <label className="block text-xs font-medium text-gray-600 mb-1">血型</label>
-                                                    <input name="bloodType" defaultValue={baby.bloodType} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm outline-none" />
-                                                </div>
-                                            </div>
-                                            <div className="md:col-span-2">
-                                                <button className="w-full md:w-auto bg-purple-600 text-white px-6 py-2.5 rounded-lg font-medium hover:bg-purple-700 text-sm">
-                                                    💾 保存档案
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </form>
+                            <div className="space-y-4">
+                                {/* 子标签导航 */}
+                                <div className="card rounded-2xl p-2 flex gap-2 overflow-x-auto">
+                                    {[
+                                        { id: 'profile', icon: '👶', label: '宝宝档案' },
+                                        { id: 'backup', icon: '🔄', label: '备份管理' },
+                                        { id: 'api', icon: '🔑', label: 'API Token' }
+                                    ].map(tab => (
+                                        <button
+                                            key={tab.id}
+                                            onClick={() => setSettingsTab(tab.id)}
+                                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
+                                                settingsTab === tab.id
+                                                ? 'bg-purple-600 text-white shadow-lg'
+                                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                            }`}
+                                        >
+                                            {tab.icon} {tab.label}
+                                        </button>
+                                    ))}
                                 </div>
 
-                                {/* 备份管理 - 全宽大卡片 */}
-                                {!isDemo && (
+                                {/* 宝宝档案 */}
+                                {settingsTab === 'profile' && (
+                                <div className="card rounded-2xl overflow-hidden">
+                                    {editingBabyProfile ? (
+                                        /* 编辑模式 */
+                                        <div className="p-4 md:p-6">
+                                            <div className="flex items-center justify-between mb-6">
+                                                <h3 className="text-lg font-bold text-gray-800">✏️ 编辑档案</h3>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setEditingBabyProfile(false)}
+                                                    className="text-gray-400 hover:text-gray-600 text-xl"
+                                                >✕</button>
+                                            </div>
+                                            <form onSubmit={(e) => { e.preventDefault(); handleUpdateBaby(new FormData(e.target)); }}>
+                                                {/* 头像编辑 */}
+                                                <div className="flex flex-col items-center mb-6">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowAvatarModal(true)}
+                                                        className="relative group mb-2"
+                                                    >
+                                                        <div className="w-28 h-28 rounded-full overflow-hidden bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center text-white text-5xl shadow-xl ring-4 ring-white transition-transform group-hover:scale-105">
+                                                            {baby.avatar ? (
+                                                                <img src={baby.avatar} alt="头像" className="w-full h-full object-cover" />
+                                                            ) : (
+                                                                '👶'
+                                                            )}
+                                                        </div>
+                                                        <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-full opacity-0 group-hover:opacity-100 group-active:opacity-100 transition-opacity">
+                                                            <span className="text-white text-sm font-medium">📷 更换</span>
+                                                        </div>
+                                                        <div className="absolute -bottom-1 -right-1 w-8 h-8 bg-purple-500 rounded-full flex items-center justify-center text-white text-sm shadow-lg">
+                                                            📷
+                                                        </div>
+                                                    </button>
+                                                    {baby.avatar && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleAvatarDelete}
+                                                            className="text-xs text-red-500 hover:text-red-600 mt-1"
+                                                        >
+                                                            删除头像
+                                                        </button>
+                                                    )}
+                                                </div>
+
+                                                {/* 表单字段 */}
+                                                <div className="space-y-4">
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-gray-700 mb-1.5">👶 宝宝昵称</label>
+                                                        <input name="name" defaultValue={baby.name} className="w-full p-3 border border-gray-200 rounded-xl text-base focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all" placeholder="宝宝的昵称" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-gray-700 mb-1.5">🎂 出生日期</label>
+                                                        <input type="date" name="birthDate" defaultValue={baby.birthDate} className="w-full p-3 border border-gray-200 rounded-xl text-base outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all" />
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div>
+                                                            <label className="block text-sm font-medium text-gray-700 mb-1.5">👫 性别</label>
+                                                            <select name="gender" defaultValue={baby.gender} className="w-full p-3 border border-gray-200 rounded-xl text-base outline-none bg-white focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all">
+                                                                <option value="male">👦 男宝宝</option>
+                                                                <option value="female">👧 女宝宝</option>
+                                                            </select>
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-sm font-medium text-gray-700 mb-1.5">🩸 血型</label>
+                                                            <input name="bloodType" defaultValue={baby.bloodType} className="w-full p-3 border border-gray-200 rounded-xl text-base outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all" placeholder="如 A、B、O、AB" />
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* 按钮 */}
+                                                <div className="flex gap-3 mt-6">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setEditingBabyProfile(false)}
+                                                        className="flex-1 py-3 border border-gray-300 text-gray-600 rounded-xl font-medium hover:bg-gray-50 active:bg-gray-100 transition-all"
+                                                    >
+                                                        取消
+                                                    </button>
+                                                    <button className="flex-1 bg-gradient-to-r from-purple-600 to-pink-500 text-white py-3 rounded-xl font-medium hover:shadow-lg active:scale-[0.98] transition-all">
+                                                        💾 保存
+                                                    </button>
+                                                </div>
+                                            </form>
+                                        </div>
+                                    ) : (
+                                        /* 展示模式 - 全新设计 */
+                                        <div>
+                                            {/* 顶部渐变背景区域 */}
+                                            <div className="relative bg-gradient-to-br from-purple-500 via-pink-500 to-orange-400 pt-8 pb-16 px-4">
+                                                {/* 装饰性圆圈 */}
+                                                <div className="absolute top-4 left-4 w-20 h-20 bg-white/10 rounded-full blur-xl"></div>
+                                                <div className="absolute bottom-8 right-8 w-32 h-32 bg-white/10 rounded-full blur-xl"></div>
+
+                                                {/* 编辑按钮 */}
+                                                <button
+                                                    onClick={() => setEditingBabyProfile(true)}
+                                                    className="absolute top-4 right-4 bg-white/20 backdrop-blur-sm text-white px-3 py-1.5 rounded-full text-sm font-medium hover:bg-white/30 transition-all flex items-center gap-1"
+                                                >
+                                                    ✏️ 编辑
+                                                </button>
+
+                                                {/* 头像 */}
+                                                <div className="flex justify-center">
+                                                    <div className="relative">
+                                                        <div className="w-28 h-28 md:w-32 md:h-32 rounded-full overflow-hidden bg-white flex items-center justify-center text-5xl shadow-2xl ring-4 ring-white/50">
+                                                            {baby.avatar ? (
+                                                                <img src={baby.avatar} alt="头像" className="w-full h-full object-cover" />
+                                                            ) : (
+                                                                <span className="bg-gradient-to-br from-pink-400 to-purple-500 w-full h-full flex items-center justify-center">👶</span>
+                                                            )}
+                                                        </div>
+                                                        {/* 性别标识 */}
+                                                        <div className={`absolute -bottom-1 -right-1 w-10 h-10 rounded-full flex items-center justify-center text-xl shadow-lg ${baby.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'}`}>
+                                                            {baby.gender === 'male' ? '👦' : '👧'}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* 信息卡片区域 - 上移覆盖渐变区域 */}
+                                            <div className="px-4 -mt-10 pb-4 relative z-10">
+                                                {/* 名字和年龄 */}
+                                                <div className="bg-white rounded-2xl shadow-lg p-4 mb-3 text-center">
+                                                    <h2 className="text-2xl font-bold text-gray-800 mb-1">{baby.name}</h2>
+                                                    <div className="inline-flex items-center gap-2 bg-gradient-to-r from-purple-100 to-pink-100 text-purple-700 px-4 py-1.5 rounded-full text-sm font-medium">
+                                                        <span>🎂</span>
+                                                        <span>{ageStr}</span>
+                                                    </div>
+                                                </div>
+
+                                                {/* 详细信息网格 */}
+                                                <div className="grid grid-cols-3 gap-2">
+                                                    <div className="bg-white rounded-xl shadow-md p-3 text-center">
+                                                        <div className="w-10 h-10 mx-auto mb-2 bg-purple-100 rounded-full flex items-center justify-center text-xl">
+                                                            📅
+                                                        </div>
+                                                        <div className="text-[10px] text-gray-400 uppercase tracking-wide mb-0.5">出生日期</div>
+                                                        <div className="text-sm font-semibold text-gray-800">{baby.birthDate?.replace(/-/g, '.')}</div>
+                                                    </div>
+                                                    <div className="bg-white rounded-xl shadow-md p-3 text-center">
+                                                        <div className={`w-10 h-10 mx-auto mb-2 rounded-full flex items-center justify-center text-xl ${baby.gender === 'male' ? 'bg-blue-100' : 'bg-pink-100'}`}>
+                                                            {baby.gender === 'male' ? '👦' : '👧'}
+                                                        </div>
+                                                        <div className="text-[10px] text-gray-400 uppercase tracking-wide mb-0.5">性别</div>
+                                                        <div className="text-sm font-semibold text-gray-800">{baby.gender === 'male' ? '男宝宝' : '女宝宝'}</div>
+                                                    </div>
+                                                    <div className="bg-white rounded-xl shadow-md p-3 text-center">
+                                                        <div className="w-10 h-10 mx-auto mb-2 bg-red-100 rounded-full flex items-center justify-center text-xl">
+                                                            🩸
+                                                        </div>
+                                                        <div className="text-[10px] text-gray-400 uppercase tracking-wide mb-0.5">血型</div>
+                                                        <div className="text-sm font-semibold text-gray-800">{baby.bloodType || '未设置'}</div>
+                                                    </div>
+                                                </div>
+
+                                                {/* 成长数据快捷入口 */}
+                                                <div className="mt-3 bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl p-3">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-lg">📊</span>
+                                                            <span className="text-sm font-medium text-gray-700">最新成长数据</span>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => setView('dashboard')}
+                                                            className="text-xs text-purple-600 font-medium hover:text-purple-700"
+                                                        >
+                                                            查看详情 →
+                                                        </button>
+                                                    </div>
+                                                    <div className="flex justify-around mt-2 pt-2 border-t border-purple-100">
+                                                        <div className="text-center">
+                                                            <div className="text-lg font-bold text-purple-600">{stats.height}<span className="text-xs font-normal text-gray-400 ml-0.5">cm</span></div>
+                                                            <div className="text-[10px] text-gray-500">身高</div>
+                                                        </div>
+                                                        <div className="w-px bg-purple-200"></div>
+                                                        <div className="text-center">
+                                                            <div className="text-lg font-bold text-green-600">{stats.weight}<span className="text-xs font-normal text-gray-400 ml-0.5">kg</span></div>
+                                                            <div className="text-[10px] text-gray-500">体重</div>
+                                                        </div>
+                                                        <div className="w-px bg-purple-200"></div>
+                                                        <div className="text-center">
+                                                            <div className="text-lg font-bold text-blue-600">{stats.head}<span className="text-xs font-normal text-gray-400 ml-0.5">cm</span></div>
+                                                            <div className="text-[10px] text-gray-500">头围</div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                                )}
+
+                                {/* 备份管理 */}
+                                {settingsTab === 'backup' && !isDemo && (
                                     <div className="card rounded-2xl p-4 md:p-6">
                                         {/* 标题行：标题 + 操作按钮 */}
                                         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
@@ -1339,11 +1735,235 @@
                                     </div>
                                 )}
 
-                                {/* 演示模式提示 */}
-                                {isDemo && (
+                                {/* API Token 管理 */}
+                                {settingsTab === 'api' && !isDemo && (
+                                    <div className="card rounded-2xl p-4 md:p-6">
+                                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+                                            <div>
+                                                <h3 className="text-base md:text-lg font-bold text-gray-800">🔑 API Token 管理</h3>
+                                                <p className="text-xs text-gray-500 mt-1">管理外部应用访问 API 的凭证</p>
+                                            </div>
+                                            <button
+                                                onClick={() => setShowTokenModal(true)}
+                                                className="bg-purple-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-purple-700"
+                                            >
+                                                ➕ 创建 Token
+                                            </button>
+                                        </div>
+
+                                        {/* Token 列表 */}
+                                        {apiTokens.length > 0 ? (
+                                            <div className="space-y-3">
+                                                {apiTokens.map(token => {
+                                                    const expiryStatus = getTokenExpiryStatus(token.expires_at);
+                                                    const isExpired = expiryStatus.status === 'expired';
+                                                    return (
+                                                    <div key={token.id} className={`border rounded-xl p-4 ${
+                                                        isExpired ? 'bg-red-50 border-red-200' :
+                                                        !token.is_active ? 'bg-gray-50 border-gray-200' :
+                                                        'bg-white border-gray-200'
+                                                    }`}>
+                                                        <div className="flex items-start justify-between">
+                                                            <div className="flex-1">
+                                                                <div className="flex items-center gap-2 flex-wrap">
+                                                                    <span className="font-medium text-gray-800">{token.name}</span>
+                                                                    <span className={`text-xs px-2 py-0.5 rounded-full ${
+                                                                        token.permission === 'write'
+                                                                            ? 'bg-orange-100 text-orange-700'
+                                                                            : 'bg-blue-100 text-blue-700'
+                                                                    }`}>
+                                                                        {token.permission === 'write' ? '读写' : '只读'}
+                                                                    </span>
+                                                                    <span className={`text-xs px-2 py-0.5 rounded-full ${
+                                                                        expiryStatus.color === 'green' ? 'bg-green-100 text-green-700' :
+                                                                        expiryStatus.color === 'red' ? 'bg-red-100 text-red-700' :
+                                                                        expiryStatus.color === 'orange' ? 'bg-amber-100 text-amber-700' :
+                                                                        'bg-blue-100 text-blue-700'
+                                                                    }`}>
+                                                                        {expiryStatus.text}
+                                                                    </span>
+                                                                    {!token.is_active && (
+                                                                        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-200 text-gray-600">已禁用</span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="text-xs text-gray-400 mt-1">
+                                                                    创建: {new Date(token.created_at).toLocaleString()}
+                                                                    {token.last_used_at && (
+                                                                        <span className="ml-3">最后使用: {new Date(token.last_used_at).toLocaleString()}</span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                <button
+                                                                    onClick={() => handleToggleToken(token.id, token.is_active)}
+                                                                    className={`text-xs px-3 py-1.5 rounded-lg font-medium ${
+                                                                        token.is_active
+                                                                            ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                                                            : 'bg-green-100 text-green-700 hover:bg-green-200'
+                                                                    }`}
+                                                                >
+                                                                    {token.is_active ? '禁用' : '启用'}
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => handleDeleteToken(token.id, token.name)}
+                                                                    className="text-xs px-3 py-1.5 rounded-lg font-medium bg-red-50 text-red-600 hover:bg-red-100"
+                                                                >
+                                                                    删除
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <div className="text-center py-8 text-gray-400 bg-gray-50 rounded-xl">
+                                                <div className="text-3xl mb-2">🔐</div>
+                                                <p className="text-sm">暂无 API Token</p>
+                                                <p className="text-xs mt-1">创建 Token 以允许外部应用（如 AI 助手）访问数据</p>
+                                            </div>
+                                        )}
+
+                                        {/* 使用说明 */}
+                                        <div className="mt-4 p-3 bg-blue-50 rounded-xl text-xs text-blue-700">
+                                            <div className="font-medium mb-1">📖 使用方式：</div>
+                                            <div className="space-y-1 text-blue-600">
+                                                <div>• <code className="bg-blue-100 px-1 rounded">Authorization: Bearer &lt;token&gt;</code></div>
+                                                <div>• <code className="bg-blue-100 px-1 rounded">X-API-Key: &lt;token&gt;</code></div>
+                                                <div>• <code className="bg-blue-100 px-1 rounded">?api_key=&lt;token&gt;</code> (URL 参数)</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 创建 Token 模态框 */}
+                                {showTokenModal && (
+                                    <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+                                        <div className="card rounded-2xl w-full max-w-md overflow-hidden">
+                                            <div className="bg-gradient-to-r from-purple-600 to-pink-500 text-white p-4 flex justify-between items-center">
+                                                <h3 className="font-bold">🔑 创建 API Token</h3>
+                                                <button onClick={() => { setShowTokenModal(false); setNewToken(null); }} className="text-white/80 hover:text-white text-xl">×</button>
+                                            </div>
+                                            <div className="p-6">
+                                                {newToken ? (
+                                                    /* 显示新创建的 Token */
+                                                    <div className="space-y-4">
+                                                        <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                                                            <div className="flex items-center gap-2 text-green-700 font-medium mb-2">
+                                                                <span>✅</span> Token 创建成功！
+                                                            </div>
+                                                            <div className="bg-white rounded-lg p-3 border border-green-200">
+                                                                <div className="text-xs text-gray-500 mb-1">Token（请立即保存）：</div>
+                                                                <div className="font-mono text-sm break-all text-gray-800 select-all">{newToken.token}</div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-700">
+                                                            ⚠️ <strong>重要：</strong>此 Token 只会显示一次，关闭后将无法再次查看。请立即复制并安全保存。
+                                                        </div>
+                                                        <div className="flex gap-3">
+                                                            <button
+                                                                onClick={() => copyToClipboard(newToken.token)}
+                                                                className="flex-1 bg-purple-600 text-white py-3 rounded-xl font-medium hover:bg-purple-700"
+                                                            >
+                                                                📋 复制 Token
+                                                            </button>
+                                                            <button
+                                                                onClick={() => { setShowTokenModal(false); setNewToken(null); }}
+                                                                className="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl font-medium hover:bg-gray-200"
+                                                            >
+                                                                关闭
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    /* 创建表单 */
+                                                    <div className="space-y-4">
+                                                        <div>
+                                                            <label className="block text-sm font-medium text-gray-700 mb-1">Token 名称</label>
+                                                            <input
+                                                                type="text"
+                                                                value={tokenForm.name}
+                                                                onChange={(e) => setTokenForm(prev => ({ ...prev, name: e.target.value }))}
+                                                                className="w-full p-3 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-purple-500"
+                                                                placeholder="例如：Gemini AI、Home Assistant"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-sm font-medium text-gray-700 mb-1">权限级别</label>
+                                                            <div className="grid grid-cols-2 gap-3">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setTokenForm(prev => ({ ...prev, permission: 'read' }))}
+                                                                    className={`p-3 rounded-xl border-2 text-left ${
+                                                                        tokenForm.permission === 'read'
+                                                                            ? 'border-purple-500 bg-purple-50'
+                                                                            : 'border-gray-200 hover:border-gray-300'
+                                                                    }`}
+                                                                >
+                                                                    <div className="font-medium text-gray-800">👁️ 只读</div>
+                                                                    <div className="text-xs text-gray-500 mt-1">仅查询数据</div>
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setTokenForm(prev => ({ ...prev, permission: 'write' }))}
+                                                                    className={`p-3 rounded-xl border-2 text-left ${
+                                                                        tokenForm.permission === 'write'
+                                                                            ? 'border-orange-500 bg-orange-50'
+                                                                            : 'border-gray-200 hover:border-gray-300'
+                                                                    }`}
+                                                                >
+                                                                    <div className="font-medium text-gray-800">✏️ 读写</div>
+                                                                    <div className="text-xs text-gray-500 mt-1">查询+新增+修改</div>
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-sm font-medium text-gray-700 mb-1">有效期</label>
+                                                            <div className="grid grid-cols-4 gap-2">
+                                                                {[
+                                                                    { value: 0, label: '永久' },
+                                                                    { value: 7, label: '7天' },
+                                                                    { value: 30, label: '30天' },
+                                                                    { value: 90, label: '90天' }
+                                                                ].map(opt => (
+                                                                    <button
+                                                                        key={opt.value}
+                                                                        type="button"
+                                                                        onClick={() => setTokenForm(prev => ({ ...prev, expires_in: opt.value }))}
+                                                                        className={`p-2.5 rounded-xl border-2 text-center text-sm font-medium ${
+                                                                            tokenForm.expires_in === opt.value
+                                                                                ? 'border-green-500 bg-green-50 text-green-700'
+                                                                                : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                                                                        }`}
+                                                                    >
+                                                                        {opt.label}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                            <div className="text-xs text-gray-400 mt-1.5">
+                                                                {tokenForm.expires_in === 0
+                                                                    ? '💡 Token 将永久有效，除非手动禁用或删除'
+                                                                    : `⏰ Token 将在 ${tokenForm.expires_in} 天后自动失效`}
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            onClick={handleCreateToken}
+                                                            className="w-full bg-purple-600 text-white py-3 rounded-xl font-medium hover:bg-purple-700"
+                                                        >
+                                                            🔑 生成 Token
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 演示模式提示 - 仅在备份/API标签下显示 */}
+                                {isDemo && (settingsTab === 'backup' || settingsTab === 'api') && (
                                     <div className="card rounded-2xl p-6 text-center text-gray-400">
                                         <div className="text-4xl mb-2">🔒</div>
-                                        <p>连接到服务器后可配置备份</p>
+                                        <p>连接到服务器后可使用此功能</p>
                                     </div>
                                 )}
                             </div>
@@ -1596,7 +2216,7 @@
                                                     <div
                                                         key={m.id}
                                                         className="aspect-square bg-gray-100 rounded-xl overflow-hidden cursor-pointer hover:ring-2 hover:ring-purple-400 transition-all"
-                                                        onClick={() => setLightboxImage(m)}
+                                                        onClick={() => { setLightboxImage(m); setLightboxMediaList(getRecordMedia(viewingRecord)); }}
                                                     >
                                                         {m.type === 'video' ? (
                                                             <div className="w-full h-full flex items-center justify-center bg-gray-200">
@@ -1637,17 +2257,18 @@
 
                     {/* 灯箱预览 - 支持滑动切换 */}
                     {lightboxImage && (() => {
-                        // 获取所有媒体的平铺列表用于滑动
+                        // 使用记录关联的图片列表或全部图库
                         const allMedia = [...media].sort((a, b) => new Date(b.date) - new Date(a.date));
-                        const currentIndex = allMedia.findIndex(m => m.url === lightboxImage.url);
+                        const mediaList = lightboxMediaList || allMedia;
+                        const currentIndex = mediaList.findIndex(m => m.url === lightboxImage.url);
                         const hasPrev = currentIndex > 0;
-                        const hasNext = currentIndex < allMedia.length - 1;
+                        const hasNext = currentIndex < mediaList.length - 1;
 
                         const goToPrev = () => {
-                            if (hasPrev) setLightboxImage(allMedia[currentIndex - 1]);
+                            if (hasPrev) setLightboxImage(mediaList[currentIndex - 1]);
                         };
                         const goToNext = () => {
-                            if (hasNext) setLightboxImage(allMedia[currentIndex + 1]);
+                            if (hasNext) setLightboxImage(mediaList[currentIndex + 1]);
                         };
 
                         // 触摸滑动处理
@@ -1679,12 +2300,13 @@
                                 {/* 顶部工具栏 */}
                                 <div className="flex-shrink-0 flex items-center justify-between p-3 md:p-4 bg-black/50">
                                     <div className="text-white text-sm md:text-base truncate flex-1 mr-4">
-                                        <span className="opacity-60">{currentIndex + 1} / {allMedia.length}</span>
+                                        <span className="opacity-60">{currentIndex + 1} / {mediaList.length}</span>
+                                        {lightboxMediaList && <span className="ml-2 text-xs bg-white/20 px-2 py-0.5 rounded">记录</span>}
                                         <span className="mx-2">|</span>
                                         <span>{lightboxImage.date}</span>
                                     </div>
                                     <button
-                                        onClick={() => setLightboxImage(null)}
+                                        onClick={() => { setLightboxImage(null); setLightboxMediaList(null); }}
                                         className="w-10 h-10 flex items-center justify-center text-white text-2xl hover:bg-white/10 rounded-full transition-colors"
                                     >
                                         ✕
@@ -1746,6 +2368,148 @@
                             </div>
                         );
                     })()}
+
+                    {/* 头像选择弹窗 */}
+                    {showAvatarModal && (
+                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+                            <div className="card rounded-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
+                                <div className="bg-purple-600 text-white p-4 flex justify-between items-center flex-shrink-0">
+                                    <h3 className="font-bold text-lg">
+                                        {avatarCropImage ? '📐 裁剪头像' : '📷 选择头像'}
+                                    </h3>
+                                    <button
+                                        onClick={() => { setShowAvatarModal(false); setAvatarCropImage(null); }}
+                                        className="text-2xl hover:opacity-70"
+                                    >✕</button>
+                                </div>
+
+                                {avatarCropImage ? (
+                                    /* 裁剪界面 */
+                                    <div className="p-4 flex flex-col gap-4">
+                                        <div className="relative w-full aspect-square bg-gray-100 rounded-xl overflow-hidden flex items-center justify-center">
+                                            <div
+                                                className="relative"
+                                                style={{
+                                                    width: '100%',
+                                                    height: '100%',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center'
+                                                }}
+                                            >
+                                                <img
+                                                    src={avatarCropImage.src}
+                                                    alt="裁剪预览"
+                                                    style={{
+                                                        maxWidth: '100%',
+                                                        maxHeight: '100%',
+                                                        transform: `scale(${cropPosition.scale}) translate(${cropPosition.x}px, ${cropPosition.y}px)`,
+                                                        transformOrigin: 'center'
+                                                    }}
+                                                    draggable="false"
+                                                />
+                                                {/* 圆形遮罩 */}
+                                                <div className="absolute inset-0 pointer-events-none" style={{
+                                                    boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)',
+                                                    borderRadius: '50%',
+                                                    margin: 'auto',
+                                                    width: '80%',
+                                                    height: '80%',
+                                                    maxWidth: '250px',
+                                                    maxHeight: '250px',
+                                                    position: 'absolute',
+                                                    top: '50%',
+                                                    left: '50%',
+                                                    transform: 'translate(-50%, -50%)'
+                                                }} />
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-3">
+                                            <span className="text-sm text-gray-500">🔍</span>
+                                            <input
+                                                type="range"
+                                                min="1"
+                                                max="3"
+                                                step="0.1"
+                                                value={cropPosition.scale}
+                                                onChange={(e) => setCropPosition(prev => ({ ...prev, scale: parseFloat(e.target.value) }))}
+                                                className="flex-1"
+                                            />
+                                            <span className="text-sm text-gray-500 w-12">{Math.round(cropPosition.scale * 100)}%</span>
+                                        </div>
+                                        <div className="flex gap-3">
+                                            <button
+                                                onClick={() => setAvatarCropImage(null)}
+                                                className="flex-1 py-2.5 border border-gray-300 rounded-xl text-gray-600 hover:bg-gray-50"
+                                            >
+                                                ← 重新选择
+                                            </button>
+                                            <button
+                                                onClick={handleAvatarCrop}
+                                                className="flex-1 py-2.5 bg-purple-600 text-white rounded-xl hover:bg-purple-700"
+                                            >
+                                                ✓ 确认裁剪
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    /* 选择界面 */
+                                    <div className="p-4 flex flex-col gap-4 overflow-y-auto">
+                                        {/* 上传按钮 */}
+                                        <label className="flex items-center justify-center gap-2 py-4 border-2 border-dashed border-purple-300 rounded-xl cursor-pointer hover:bg-purple-50 transition-colors">
+                                            <span className="text-purple-600 font-medium">📤 从本地上传图片</span>
+                                            <input
+                                                type="file"
+                                                accept="image/*"
+                                                className="hidden"
+                                                onChange={handleAvatarFileSelect}
+                                            />
+                                        </label>
+
+                                        {/* 媒体库选择 */}
+                                        {media.filter(m => m.type === 'image').length > 0 && (
+                                            <div>
+                                                <h4 className="text-sm font-medium text-gray-700 mb-3">🖼️ 或从媒体库选择</h4>
+                                                <div className="grid grid-cols-4 gap-2 max-h-64 overflow-y-auto">
+                                                    {media
+                                                        .filter(m => m.type === 'image')
+                                                        .slice(0, 40)
+                                                        .map(m => (
+                                                            <button
+                                                                key={m.id}
+                                                                type="button"
+                                                                onClick={() => handleAvatarSelect(m.url)}
+                                                                className="aspect-square rounded-lg overflow-hidden hover:ring-2 hover:ring-purple-500 transition-all"
+                                                            >
+                                                                <img
+                                                                    src={m.thumb || m.url}
+                                                                    alt={m.title}
+                                                                    className="w-full h-full object-cover"
+                                                                    loading="lazy"
+                                                                />
+                                                            </button>
+                                                        ))
+                                                    }
+                                                </div>
+                                                {media.filter(m => m.type === 'image').length > 40 && (
+                                                    <p className="text-xs text-gray-400 mt-2 text-center">
+                                                        仅显示最近 40 张照片
+                                                    </p>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {media.filter(m => m.type === 'image').length === 0 && (
+                                            <div className="text-center py-8 text-gray-400">
+                                                <p>📷 媒体库暂无照片</p>
+                                                <p className="text-xs mt-1">可上传本地图片作为头像</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };
